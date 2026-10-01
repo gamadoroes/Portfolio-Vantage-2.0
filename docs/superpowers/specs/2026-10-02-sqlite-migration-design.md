@@ -11,7 +11,7 @@ Replace the JSON-file-per-concern storage model (`projects/{name}/config.json`, 
 
 ## 2. Non-goals
 
-- No change to `routes/*.py` request/response contracts or `static/app.js` — this is a storage-layer swap underneath the existing API, invisible to the frontend.
+- No change to `routes/*.py` request/response **shapes** or `static/app.js` — this is a storage-layer swap underneath the existing API, invisible to the frontend. (One deliberate, narrow exception: `routes/files.py` and `routes/projects.py` gain internal special-casing for three reserved filenames — see §3 and §6 — but the JSON shapes they return/accept are byte-for-byte unchanged, so `static/app.js` needs no changes.)
 - No change to uploaded file or artefact *content* storage — `projects/{name}/files/` stays on disk.
 - No backend worker/scheduler introduced (out of scope; a separate, paused design exists for deep-research concurrency and is deliberately *not* part of this phase — see §9).
 - No requirement to get `research_tasks`/`evidence`/`findings`/`finding_evidence`/`agent_decisions` "right" in a product sense — today's app has no structured equivalent for these, so Phase 1 creates correct schema and a best-effort migration, not a finished feature.
@@ -26,6 +26,8 @@ Replace the JSON-file-per-concern storage model (`projects/{name}/config.json`, 
 | File content location | Metadata only moves to SQLite; `projects/{name}/files/` stays on disk | Matches "not large HEIMS datasets"; avoids storing document bytes in the DB |
 | `gaps` vs `suggested_topics` mapping | `suggested_topics` → new `research_tasks` rows (`status='not_started'`); `gaps` → `findings.gaps_notes` text column | A suggested topic is an actionable next research task; a gap is a note tightly bound to the finding it was observed alongside |
 | DB file location | `instance/app.db` (Flask's conventional instance folder), env-overridable via `DATABASE_PATH`, added to `.gitignore` | This repo lives inside OneDrive sync, which is why `storage.py` already retries on `PermissionError` for JSON writes. A live SQLite file is far less tolerant of being locked/renamed mid-write by a sync client than an atomic-replace JSON write is. Keeping `app.db` outside the synced `projects/` tree avoids that failure mode entirely. |
+| `insights.json`/`insights_history.json`/`excluded_competitors.json` live sync | **In scope.** `routes/files.py` (`POST /api/files`) and `routes/projects.py` (`GET /api/projects/<name>`) special-case these three reserved filenames and redirect to a new `services/insights_service.py` instead of plain file I/O, reconstructing byte-equivalent JSON at read time | Originally deferred as a one-time snapshot (see prior draft); user chose to bring it in now rather than migrate this data twice. Every other filename keeps today's plain file behavior untouched. |
+| Findings versioning | `findings` is append-only — a full new set of rows is written on every insights save, linked to a new `project_insight_versions` row | `insights_history.json` already stores a full snapshot per save today with a UI to browse old versions (`currentInsightsVersion`, version nav). Matching that exactly avoids silently regressing an existing feature. |
 
 ## 4. Schema
 
@@ -112,15 +114,33 @@ CREATE TABLE research_tasks (
     UNIQUE(project_id, phase_key)           -- NULLs (ad-hoc tasks) are exempt from this constraint in SQLite
 );
 
+CREATE TABLE project_insight_versions (
+    id              INTEGER PRIMARY KEY,
+    project_id      INTEGER NOT NULL REFERENCES projects(id),
+    version         INTEGER NOT NULL,       -- 1, 2, 3... per project, matches old insightsHistory[].version
+    generated_at    TEXT NOT NULL,          -- old insights.json.generated_at
+    competitors_json TEXT,                  -- old insights.json.competitors, stored as raw JSON (no dedicated table requested for this)
+    competitor_landscape_markdown TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE(project_id, version)
+);
+
 CREATE TABLE findings (
-    id               INTEGER PRIMARY KEY,
-    research_task_id INTEGER NOT NULL REFERENCES research_tasks(id),
-    content          TEXT NOT NULL,         -- old phase.summary
-    gaps_notes       TEXT,                  -- old phase.gaps, joined to one text block
-    confidence       TEXT,
-    effective_date   TEXT,                  -- "as of" date of the underlying researched facts, if stated
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    id                  INTEGER PRIMARY KEY,
+    research_task_id    INTEGER NOT NULL REFERENCES research_tasks(id),
+    insight_version_id  INTEGER NOT NULL REFERENCES project_insight_versions(id),
+    content             TEXT NOT NULL,      -- old phase.summary
+    gaps_notes          TEXT,               -- old phase.gaps, joined to one text block
+    confidence          TEXT,
+    effective_date      TEXT,               -- "as of" date of the underlying researched facts, if stated
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(research_task_id, insight_version_id)
+    -- Append-only: every insights save writes one findings row per phase (all 7, even
+    -- unchanged ones, matching today's full-blob-per-version behavior) under a new
+    -- insight_version_id. "Current" state = the findings joined to the latest version.
+    -- The UNIQUE constraint guards against a save accidentally inserting two rows for
+    -- the same phase within one version (e.g. a retried transaction).
 );
 
 CREATE TABLE evidence (
@@ -147,6 +167,14 @@ CREATE TABLE agent_decisions (
     detail           TEXT,                  -- free-form JSON text
     created_at       TEXT NOT NULL
 );
+
+CREATE TABLE excluded_competitors (
+    id              INTEGER PRIMARY KEY,
+    project_id      INTEGER NOT NULL REFERENCES projects(id),
+    competitor_name TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    UNIQUE(project_id, competitor_name)
+);
 ```
 
 `PHASE_DEFINITIONS` (today hardcoded only in `static/app.js`) is ported into a shared Python constant (`services/phases.py` or similar) used to seed `research_tasks` rows per project and to drive the existing `insight_type`/`phase-N` token-tuning logic in `ai.py` — giving the backend phase knowledge it has never had, without changing any behavior.
@@ -162,13 +190,15 @@ CREATE TABLE agent_decisions (
    - `artifacts.json` → `artefacts` rows (upsert by `id`), linked to `sources` by matching the artefact's backing filename.
    - `chat_history.json` → one `chat_sessions` row per session key, `project_messages` rows per message (`seq` = original array position).
    - `research_runs.json` → `research_runs` rows (upsert by `id`).
-   - `insights.json`, if present (none of today's real projects have one — this path is exercised only by synthetic test fixtures until real usage exists):
-     - Each `phases[key]` → one `research_tasks` row (`phase_key=key`).
-     - Non-"MISSING" `summary` (+ `gaps` joined) → one `findings` row.
-     - Each `evidence_sources` string → one `evidence` row (`raw_text`; `source_id` resolved via `linked_file_ids`/`linked_files` cross-lookup against `sources` where possible).
-     - `linked_file_ids` → `finding_evidence` rows (the one genuinely relational fact in today's data — not best-effort, this migrates exactly).
-     - Each `suggested_topics` string → an additional ad-hoc `research_tasks` row (`phase_key=NULL`, `status='not_started'`).
-3. All inserts are upserts keyed on preserved stable IDs (project name, `stable_file_id`, artefact/run/chat-session id) — safe to re-run after a partial failure without duplicating rows.
+   - `excluded_competitors.json`, if present → `excluded_competitors` rows (upsert by `project_id, competitor_name`).
+   - `insights_history.json`, if present → one `project_insight_versions` row per history entry (`version` = entry's `version` field, `generated_at`/`competitors`/`competitor_landscape_markdown` from that entry's full `data` snapshot), and for each entry's `phases[key]`:
+     - One `research_tasks` row (`phase_key=key`), upserted by `(project_id, phase_key)` — identity is shared across versions, only created once.
+     - One `findings` row per version per phase (non-"MISSING" `summary` + `gaps` joined), linked to that version's `project_insight_versions` row.
+     - Each `evidence_sources` string → one `evidence` row (`raw_text`; `source_id` resolved via `linked_file_ids`/`linked_files` cross-lookup against `sources` where possible) linked via `finding_evidence` to that version's finding.
+     - Each `suggested_topics` string → an additional ad-hoc `research_tasks` row (`phase_key=NULL`, `status='not_started'`), created once (not re-created per historical version, since these are forward-looking tasks, not historical facts).
+   - `insights.json` alone (no `insights_history.json`, or `insights.json`'s content differs from the last history entry — e.g. an edit made after the last history seed): treated as one additional, final `project_insight_versions` row on top of whatever `insights_history.json` contributed, so the *current* state on disk always wins as the latest version.
+   - None of today's real sample projects have any of these three files — this path is exercised by synthetic test fixtures (see §7) until real usage exists.
+3. All inserts are upserts keyed on preserved stable IDs (project name, `stable_file_id`, artefact/run/chat-session id, `(project_id, phase_key)`, `(project_id, version)`) — safe to re-run after a partial failure without duplicating rows.
 4. Source JSON files are never modified or deleted.
 5. Prints a per-project, per-table row-count report for manual verification.
 
@@ -177,15 +207,24 @@ CREATE TABLE agent_decisions (
 New `db/` package:
 - `db/connection.py` — context-managed `sqlite3` connection factory; sets `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`, a busy timeout.
 - `db/migrations/*.sql` — plain numbered SQL files (the schema in §4 split into an initial migration).
-- `db/repositories/` — one module per aggregate (`projects_repo.py`, `sources_repo.py`, `artefacts_repo.py`, `chat_repo.py`, `research_runs_repo.py`, `research_tasks_repo.py` covering tasks/findings/evidence/finding_evidence, `agent_decisions_repo.py`). Plain functions over raw rows — no ORM.
+- `db/repositories/` — one module per aggregate (`projects_repo.py`, `sources_repo.py`, `artefacts_repo.py`, `chat_repo.py`, `research_runs_repo.py`, `research_tasks_repo.py` covering tasks/findings/evidence/finding_evidence/insight_versions, `excluded_competitors_repo.py`, `agent_decisions_repo.py`). Plain functions over raw rows — no ORM.
 
-Every existing `services/*.py` module keeps its current public function names, parameters, and return shapes unchanged; only internals swap from `storage.read_json/write_json/update_json` to repository calls. **This means zero changes to `routes/*.py` or `static/app.js`.** `services/storage.py` is deleted only after every service module has been cut over — not before, and not as part of this spec's first task.
+Every existing `services/*.py` module keeps its current public function names, parameters, and return shapes unchanged; only internals swap from `storage.read_json/write_json/update_json` to repository calls. `services/storage.py` is deleted only after every service module has been cut over — not before, and not as part of this spec's first task.
+
+**New `services/insights_service.py`** (the one place with genuinely new logic, not just a storage swap):
+- `save_insights(project_name, data)` — called when `POST /api/files` receives `filename == "insights.json"`. Opens one DB transaction: creates a new `project_insight_versions` row (`version` = previous max + 1), then for each of the 7 phase keys in `data["phases"]`, upserts a `research_tasks` row (by `(project_id, phase_key)`, creating it on first use) and inserts a fresh `findings` row linked to the new version, plus `evidence`/`finding_evidence` rows for that phase's `evidence_sources`/`linked_file_ids`, plus ad-hoc `research_tasks` rows for `suggested_topics`. All 7 phases get a new findings row every save, matching today's full-blob-per-version behavior.
+- `load_current_insights(project_name)` — called from `GET /api/projects/<name>` to populate `files["insights.json"]`. Reconstructs the exact JSON shape `createEmptyInsightsData()`/`normalizeInsightsData()` expect, from the latest `project_insight_versions` row and its joined `findings`/`evidence`/`finding_evidence`.
+- `load_insights_history(project_name)` — called when `filename == "insights_history.json"` is requested; reconstructs the `[{version, generated_at, data}]` array shape from all `project_insight_versions` rows (oldest to newest), each with its full nested `data` object rebuilt the same way as `load_current_insights` but pinned to that version.
+- `save_excluded_competitors(project_name, names)` / `load_excluded_competitors(project_name)` — thin wrappers over `excluded_competitors_repo`, triggered by `filename == "excluded_competitors.json"`.
+
+**Route changes (the one deliberate exception to "zero route changes"):** `routes/files.py`'s `POST /api/files` handler checks `filename` against the three reserved names (`insights.json`, `insights_history.json`, `excluded_competitors.json`) before falling through to the existing generic `file_service.save_project_file` path, and calls the matching `insights_service` function instead. `routes/projects.py`'s `GET /api/projects/<name>` does the equivalent on the read side when assembling the `files` dict in its response. Every other filename is completely unaffected. `static/app.js` sends/receives the identical JSON shapes either way, so it needs no changes.
 
 ## 7. Testing
 
 - `tests/test_db_migrations.py` — schema applies cleanly to an empty DB; re-applying is a no-op; a missing/out-of-order migration file is rejected.
 - `tests/test_migration_script.py` — **the acceptance-criteria test.** Copies real sample project folders (e.g. "M Proj Mgmt", which has genuine runs/artefacts/chat data) into a temp dir, runs the migration script, and asserts row-for-row parity against the original JSON for artefacts, research runs, and phase associations. Also asserts a project with no `insights.json` migrates cleanly to zero `research_tasks` rows (not an error).
 - `tests/test_repositories_*.py` — CRUD round-trip per repository module against a temp DB.
+- `tests/test_insights_service.py` — synthetic fixtures (since no real project has this data yet): round-trips a multi-save sequence through `save_insights`/`load_current_insights`/`load_insights_history` and asserts the reconstructed JSON is shape-and-content-equivalent to what was saved, across multiple versions (i.e. version 1's data is still exactly recoverable after version 3 is saved). Also covers `excluded_competitors` save/load.
 - Existing tests asserting JSON-file side effects (`test_file_index_service.py`, `test_reference_integrity_service.py`, etc.) are updated as part of that specific service module's migration task, not as a separate cleanup pass.
 
 ## 8. Rollback
@@ -196,6 +235,5 @@ Cutover is one-shot, not dual-write. If an issue is found post-migration: fix th
 
 - The paused "concurrent deep research job queue" design (see conversation history / future spec) is *not* part of this phase. The `research_runs` schema above (`response_id` nullable, `status` including `'queued'`) was shaped to not block that work later, but no queueing logic is implemented here.
 - No background worker/scheduler process.
-- No change to how `insights.json`'s phase workflow is *generated* — it stays entirely client-side per `docs/ARCHITECTURE.md` §8-10.
-- **`research_tasks`/`findings`/`evidence`/`finding_evidence` are a one-time snapshot, not a live sync.** `insights.json` is written today through the generic `POST /api/files` route — a plain file write with no awareness of these new tables. This phase does not add a dedicated insights endpoint that parses saved `insights.json` content back into the new tables on every save. Practical effect: the migration script populates these tables once, from whatever `insights.json` exists (today: nothing, in every real project) at migration time; any phase data a user generates or edits *after* migration keeps landing only in the `insights.json` file on disk, not in these tables, until a later phase adds that write path. Flagging this now so it isn't a surprise when these tables don't reflect new phase activity post-cutover.
-- `effective_date`/`retrieved_at` columns (on `sources`/`evidence`/`findings`) have no corresponding field in any current JSON file — the migration script leaves them `NULL` for all migrated rows. They exist as forward-looking schema for when the app starts tracking source currency, not as something this phase populates.
+- No change to how `insights.json`'s phase workflow is *generated* (the prompt assembly, phase boundaries, sequencing in `generatePhaseInsight`/`generateInsights`) — that stays entirely client-side per `docs/ARCHITECTURE.md` §8-10. Only *where the resulting data is stored* changes, via `services/insights_service.py` (§6) — and that storage is now genuinely live, not a one-time snapshot, since the "build it in now" decision brought `routes/files.py`/`routes/projects.py` special-casing into scope.
+- `effective_date`/`retrieved_at` columns (on `sources`/`evidence`/`findings`) have no corresponding field in any current JSON file — the migration script and `insights_service` both leave them `NULL`. They exist as forward-looking schema for when the app starts tracking source currency, not as something this phase populates.
