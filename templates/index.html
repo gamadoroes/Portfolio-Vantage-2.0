@@ -1,0 +1,368 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Architect</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/turndown@7.1.2/dist/turndown.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <div class="sidebar" id="sidebar">
+            <div style="padding:1rem 1rem 0.5rem; text-align:center;">
+                <img src="/static/OES Logo Valencia.png" alt="OES" style="max-width:80%; height:auto;">
+            </div>
+            <div class="section">
+                <div class="section-header">
+                    <h3>Workflows</h3>
+                    <button onclick="newProject()" class="icon-btn" title="New workflow">+</button>
+                </div>
+                <select id="project-select" onchange="switchProject()">
+                    {% for project in projects %}
+                    <option value="{{ project }}" {% if project == current_project %}selected{% endif %}>
+                        {{ project }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div class="section">
+                <div class="section-header">
+                    <h3>Research Sessions</h3>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <button onclick="toggleChatFullscreen()" class="icon-btn" title="Fullscreen">⛶</button>
+                        <button onclick="newChat()" class="icon-btn" title="New chat">+</button>
+                    </div>
+                </div>
+                <div id="chat-list" class="scrollable-list"></div>
+            </div>
+            
+            <div class="section">
+                <div class="section-header">
+                    <h3>Source Data</h3>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <button onclick="toggleFileFullscreen()" class="icon-btn" title="Fullscreen">⛶</button>
+                        <button onclick="document.getElementById('file-upload').click()" class="icon-btn" title="Add source">+</button>
+                    </div>
+                </div>
+                <div class="file-info" style="padding: 0.5rem 0; font-size: 0.8rem; color: #666;">
+                    <small>☑ = Active Context</small>
+                </div>
+                <div id="file-list" class="scrollable-list"></div>
+                <input type="file" id="file-upload" style="display: none" accept=".txt,.md,.csv,.json,.docx" onchange="uploadFile(event)">
+            </div>
+        </div>
+        
+        <div class="sidebar-resize-handle" id="sidebar-resize"></div>
+        
+        <div class="main-content">
+            <div class="top-bar">
+                <div class="tabs">
+                    <button class="tab active" onclick="showTab('write')">Builder</button>
+                    <button class="tab" onclick="showTab('prompt-dev')">Prompt Developer</button> 
+                    <button class="tab" onclick="showTab('insights')">Insights</button> 
+                    <button class="tab" onclick="showTab('rules')">Methodology</button>
+                    <button class="tab" onclick="showTab('context')">Objective</button>
+                    <button class="tab" onclick="showTab('compiled')">Artifacts</button>
+                </div>
+            </div>
+            
+            <div id="write-tab" class="tab-content active">
+                <div id="chat-view" class="view active">
+                    <div class="chat-container">
+                        <div id="chat-messages" class="messages-area"></div>
+                        <div class="input-area">
+                            <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" id="chapter-mode-toggle" onchange="toggleChapterMode()">
+                                <span style="font-size: 0.9rem; font-weight: 500;">📋 Artifact Mode (Generate Files)</span>
+                            </label>
+                            <textarea id="chat-input" placeholder="Describe the research prompt you need to build..." rows="4"></textarea>
+                            <button onclick="sendMessage()" class="send-btn" id="send-btn">Generate</button>
+                            <button onclick="stopGeneration()" class="send-btn" id="stop-btn" style="display: none; background: #DC3545;">⏹ Stop</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="output-view" class="view output-overlay">
+                    <button class="output-close-btn" onclick="closeOutputView()">✕</button>
+                    <div class="chapter-nav-overlay">
+                        <button onclick="previousChapter()" class="chapter-nav-btn" id="prev-chapter-btn" title="Previous">◀</button>
+                        <span id="chapter-nav-title" style="font-weight: 600; color: #666; margin: 0 1rem;">Artifact</span>
+                        <button onclick="renameCurrentChapterTile()" class="icon-btn" id="rename-chapter-btn" title="Rename" style="font-size: 0.9rem; margin-right: 1rem;">✏️</button>
+                        <button onclick="nextChapter()" class="chapter-nav-btn" id="next-chapter-btn" title="Next">▶</button>
+                    </div>
+                    <div class="split-view">
+                        <div class="editor-panel">
+                            <div class="panel-header">
+                                <h3>Artifact</h3>
+                                <div class="button-group-inline">
+                                    <div style="margin-right: 1rem; border-right: 1px solid #ddd; padding-right: 1rem; display: flex; gap: 0.25rem;">
+                                        <button onclick="decreaseFontSize()" class="small-btn" title="Smaller Text">A-</button>
+                                        <button onclick="increaseFontSize()" class="small-btn" title="Larger Text">A+</button>
+                                        <button onclick="resetFontSize()" class="small-btn" title="Reset Text Size">A0</button>
+                                    </div>
+                                    <button onclick="copyOutputToClipboard()" class="small-btn copy-btn-success">Copy</button>
+                                    <button onclick="toggleOutputPreview()" class="small-btn" id="output-preview-toggle">Preview</button>
+                                    <button onclick="saveOutput()" class="small-btn">Save to Files</button>
+                                </div>
+                            </div>
+                            <div id="output-editor" class="text-editor" contenteditable="true"></div>
+                        </div>
+
+                        <!-- Persistent toggle tab on the right edge -->
+                        <button class="chat-panel-toggle" id="chat-panel-toggle" onclick="toggleEditPanel()" title="AI Assistant">
+                            <span class="chat-panel-toggle-icon">AI</span>
+                        </button>
+
+                        <div class="chat-panel" id="edit-panel">
+                            <div class="panel-header">
+                                <h3 id="edit-panel-title">AI Assistant</h3>
+                                <button onclick="toggleEditPanel()" class="small-btn" id="toggle-edit-btn">Hide</button>
+                            </div>
+                            <div id="edit-panel-context" class="edit-panel-context">
+                                <div id="edit-source-badge" class="edit-source-badge" style="display:none;"></div>
+                                <div id="marked-text-display" class="marked-text-box" style="display: none;">
+                                    <strong>Selected:</strong>
+                                    <div id="marked-text-content"></div>
+                                </div>
+                            </div>
+                            <div id="edit-chat-messages" class="messages-area small"></div>
+                            <div class="input-area" style="padding:0.75rem;">
+                                <textarea id="edit-chat-input" placeholder="Ask a question or select text to refine..." rows="3"></textarea>
+                                <div class="edit-buttons-row">
+                                    <button onclick="markSelection()" class="btn-secondary" id="mark-btn" style="flex:0 0 auto; font-size:0.78rem;">Use Selection</button>
+                                    <button onclick="sendEditMessage()" class="btn-primary" id="edit-send-btn" style="flex:1;">Refine</button>
+                                    <button onclick="clearEditChat()" class="btn-secondary" style="flex:0 0 auto; font-size:0.78rem;">Clear</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div> 
+
+            <div id="prompt-dev-tab" class="tab-content">
+              <div style="flex:1; overflow-y:auto; padding-bottom:50px;">
+                <div class="settings-container" style="max-width: 800px; margin: 2rem auto; padding: 0 1rem;">
+                    <h2>Prompt Engineering Studio</h2>
+                    <p style="color:#666; margin-bottom:1.5rem;">Configure a high-performance prompt based on expert frameworks.</p>
+                    <div class="form-group" style="margin-bottom: 1rem;">
+                        <label style="display:block; margin-bottom:0.5rem; font-weight:500;">Select Framework</label>
+                        <select id="prompt-framework-select" onchange="updatePromptForm()">
+                            <optgroup label="OES Research Phases">
+                                <option value="oes-landscape">Phase 1: The Landscape</option>
+                                <option value="oes-student-persona">Phase 2: The Student</option>
+                            </optgroup>
+                            <optgroup label="Phase 3: Review of Marketing">
+                                <option value="oes-marketing-comparative">3a: Comparative Marketing Analysis</option>
+                                <option value="oes-marketing-website">3b: Website Review</option>
+                                <option value="oes-marketing-sentiment">3c: Sentiment Analysis &amp; Social Listening</option>
+                            </optgroup>
+                            <optgroup label="OES Research Phases (cont.)">
+                                <option value="oes-product-features">Phase 4: Product Features</option>
+                            </optgroup>
+                            <optgroup label="Phase 5: Academic Content">
+                                <option value="oes-academic-structure">5a: Course Structure &amp; Academic Differentiators</option>
+                                <option value="oes-academic-unitdive">5b: Unit-by-Unit Deep Dive</option>
+                            </optgroup>
+                            <optgroup label="OES Research Phases (cont.)">
+                                <option value="oes-industry-engagement">Phase 6: Industry Engagement</option>
+                                <option value="oes-options-whitespace">Phase 7: Options for OES</option>
+                            </optgroup>
+                            <optgroup label="Utility">
+                                <option value="deep-research">Deep Research Generator</option>
+                                <option value="web-scraping">Web Scraping / Data Collection</option>
+                            </optgroup>
+                        </select>
+                    </div>
+                    <div id="prompt-form-container" class="form-container"></div>
+                    <div class="button-group" style="margin-top: 2rem;">
+                        <button onclick="generateStructuredPrompt()" class="btn-primary" id="prompt-dev-generate-btn" style="width:100%">✨ Generate Master Prompt</button>
+                    </div>
+                    <div id="prompt-dev-output" class="prompt-dev-output" style="display:none;">
+                        <div class="prompt-dev-header">
+                            <h3>Suggested Prompt</h3>
+                            <div class="button-group-inline">
+                                <button onclick="copyPromptDevPrompt()" class="small-btn">📋 Copy</button>
+                                <button onclick="savePromptDevAsArtifact()" class="small-btn">Save as Artifact</button>
+                                <button onclick="runDeepResearchFromPrompt()" class="btn-primary" id="deep-research-run-btn">🔎 Run Deep Research</button>
+                            </div>
+                        </div>
+                        <textarea id="prompt-dev-editor" class="large-textarea" rows="10" placeholder="Generated prompt will appear here..."></textarea>
+                        <div id="prompt-dev-status" class="prompt-dev-status"></div>
+                    </div>
+                </div>
+
+                <div id="research-runs-section" style="max-width:800px; margin:1.5rem auto; padding:0 1rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                        <h3 style="margin:0; color:var(--oes-ink);">Research Runs</h3>
+                        <button onclick="refreshResearchRuns()" class="small-btn">Refresh</button>
+                    </div>
+                    <div id="research-runs-list" class="competitor-grid">
+                        <div class="empty-state" style="padding:2rem;">No research runs yet.</div>
+                    </div>
+                </div>
+              </div>
+            </div>
+
+            <div id="insights-tab" class="tab-content">
+                <div class="story-map-container">
+                    <div class="story-map-header" style="background: white; padding: 1rem; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <h2 style="margin:0;">Strategic Insights Dashboard</h2>
+                            <p id="insights-status" style="font-size:0.85rem; color:#666; margin:0.25rem 0 0 0;">No insights generated yet</p>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                            <div id="insights-version-nav" style="display:none; align-items:center; gap:0.5rem; background:#f8f9fa; padding:0.4rem 0.75rem; border-radius:6px; border:1px solid #e0e0e0;">
+                                <button onclick="viewPreviousInsightsVersion()" class="icon-btn" id="insights-prev-ver" title="Previous version" style="font-size:0.8rem;">&#9664;</button>
+                                <span id="insights-version-label" style="font-size:0.8rem; font-weight:600; color:var(--oes-ink); min-width:80px; text-align:center;">v1 of 1</span>
+                                <button onclick="viewNextInsightsVersion()" class="icon-btn" id="insights-next-ver" title="Next version" style="font-size:0.8rem;">&#9654;</button>
+                            </div>
+                            <div class="story-map-controls" style="display: flex; gap: 0.5rem; align-items: center;">
+                                <button onclick="downloadInsights()" class="btn-secondary" id="download-json-btn" style="display:none;">📥 JSON</button>
+                                <button onclick="downloadInsightsAsReport()" class="btn-secondary" id="download-report-btn" style="display:none;">📄 Report</button>
+                                <button onclick="showRefreshAllInstructionModal()" class="btn-secondary" id="insight-btn">Refresh All</button>
+                                <button onclick="stopInsightsGeneration()" class="btn-secondary" id="insight-stop-btn" style="display:none; background:#dc3545; border-color:#dc3545; color:#fff;">⏹ Stop</button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="story-map-content">
+                        <div class="section-header-with-action">
+                            <h3 class="dashboard-header" style="margin-bottom:0;">Competitor Landscape</h3>
+                            <div id="competitor-section-actions"></div>
+                        </div>
+                        <div id="excluded-competitors-list"></div>
+                        <div id="competitor-grid" class="competitor-grid">
+                            <div class="empty-state">Upload source files, then click "Generate Competitors" to analyse.</div>
+                        </div>
+
+                        <h3 class="dashboard-header" style="margin-top: 2rem;">7-Phase Strategic Analysis</h3>
+                        <div id="phase-nav-bar" class="phase-nav-bar"></div>
+                        <div id="insight-phases" class="insight-phases-container"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="rules-tab" class="tab-content">
+                <div class="settings-container" style="max-width: 800px; margin: 2rem auto; padding: 0 1rem;">
+                    <h2>Methodology Rules</h2>
+                    <textarea id="system-prompt" class="large-textarea" placeholder="Define the AI Persona and Research Guidelines..."></textarea>
+                    <button onclick="savePrompt('system')" class="btn-primary">Save Rules</button>
+                </div>
+            </div>
+
+            <div id="context-tab" class="tab-content">
+                <div class="settings-container" style="max-width: 800px; margin: 2rem auto; padding: 0 1rem;">
+                    <h2>Research Objectives</h2>
+                    <textarea id="project-prompt" class="large-textarea" placeholder="Define the core goals of this research project..."></textarea>
+                    <button onclick="savePrompt('project')" class="btn-primary">Save Objective</button>
+                </div>
+            </div>
+
+            <div id="compiled-tab" class="tab-content">
+                 <div class="reader-view" style="padding: 2rem;">
+                    <div class="reader-header" style="margin-bottom: 1rem; display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                        <h2 style="margin:0;">Artifacts</h2>
+                        <div style="display:flex; gap:0.5rem;">
+                            <button onclick="migrateArtifactsToFiles()" class="btn-secondary">Migrate Artifacts to Files</button>
+                            <button onclick="renderFileList()" class="btn-secondary">Refresh List</button>
+                        </div>
+                    </div>
+                    <div class="reader-content" id="compiled-content">
+                        Select 'Artifacts' in Source Data to view.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="save-modal" class="modal">
+        <div class="modal-content">
+            <h3>Save Artifact</h3>
+            <input type="text" id="save-filename" placeholder="artifact_01.md">
+            <div class="button-group">
+                <button onclick="confirmSaveOutput()" class="btn-primary">Save</button>
+                <button onclick="closeSaveModal()" class="btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="file-editor-modal" class="modal">
+        <div class="modal-content large-modal">
+            <div class="modal-header">
+                <h3>Edit File</h3>
+                <button onclick="closeFileEditor()" class="icon-btn">✕</button>
+            </div>
+            <div id="file-editor-content" class="large-textarea" contenteditable="true" style="border:1px solid #ddd; padding:1rem; overflow:auto;"></div>
+            <div class="button-group">
+                <button onclick="saveFileFromEditor()" class="btn-primary">Save Changes</button>
+                <button onclick="closeFileEditor()" class="btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="competitor-detail-modal" class="modal">
+        <div class="modal-content competitor-detail-modal-content">
+            <div class="modal-header">
+                <h3>Competitor Details</h3>
+                <button onclick="closeCompetitorModal()" class="icon-btn">&#x2715;</button>
+            </div>
+            <div class="comp-modal-body">
+                <div class="comp-modal-row">
+                    <label>Name</label>
+                    <input type="text" id="comp-modal-name" placeholder="Competitor name">
+                </div>
+                <div class="comp-modal-row">
+                    <label>Fee / Price</label>
+                    <input type="text" id="comp-modal-price" placeholder="e.g. $15,000">
+                </div>
+                <div class="comp-modal-row">
+                    <label>Duration</label>
+                    <input type="text" id="comp-modal-duration" placeholder="e.g. 12 months">
+                </div>
+                <div class="comp-modal-row">
+                    <label>USP</label>
+                    <input type="text" id="comp-modal-usp" placeholder="Unique selling proposition">
+                </div>
+                <div class="comp-modal-row" style="flex-direction:column;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+                        <label style="margin:0;">Details</label>
+                        <button onclick="toggleCompDetailsPreview()" class="small-btn" id="comp-details-preview-toggle">Preview</button>
+                    </div>
+                    <div id="comp-modal-details" class="comp-details-editor" contenteditable="true"></div>
+                </div>
+            </div>
+            <div class="button-group" style="justify-content:space-between;">
+                <button onclick="deleteCompetitorFromModal()" class="btn-secondary comp-delete-btn">Delete Competitor</button>
+                <div style="display:flex; gap:0.5rem;">
+                    <button onclick="populateCompetitorFromSource()" class="btn-secondary" id="comp-populate-btn">Populate from Source Data</button>
+                    <button onclick="saveCompetitorFromModal()" class="btn-primary">Save</button>
+                    <button onclick="closeCompetitorModal()" class="btn-secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="refresh-all-instructions-modal" class="modal">
+        <div class="modal-content" style="width: 500px;">
+            <h3>Refresh All Phases</h3>
+            <p style="font-size: 0.85rem; color: #666; margin-bottom: 0.75rem;">Optionally provide instructions to guide the AI across all phases. Leave blank for default analysis.</p>
+            <textarea id="refresh-all-instructions" class="phase-instruction-textarea" rows="4" placeholder="e.g. Focus on pricing strategy and integrate the new UNSW document..."></textarea>
+            <div class="button-group">
+                <button onclick="confirmRefreshAll()" class="btn-primary">Run All</button>
+                <button onclick="closeRefreshAllModal()" class="btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="research-runs-indicator" onclick="showTab('prompt-dev')" style="display:none; position:fixed; bottom:1rem; right:1rem; background:var(--oes-ink); color:white; padding:0.5rem 1rem; border-radius:8px; font-size:0.85rem; z-index:200; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2); animation:pulse-glow 2s infinite;">
+        <span id="runs-indicator-text">0 runs in progress</span>
+    </div>
+    <div id="insights-indicator" onclick="showTab('insights')" style="display:none; position:fixed; bottom:3.5rem; right:1rem; background:var(--oes-ink); color:white; padding:0.5rem 1rem; border-radius:8px; font-size:0.85rem; z-index:200; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2); animation:pulse-glow 2s infinite;">
+        <span id="insights-indicator-text">Generating insights...</span>
+    </div>
+    <div id="toast-container"></div>
+    <script src="/static/app.js?v=13.0"></script>
+</body>
+</html>

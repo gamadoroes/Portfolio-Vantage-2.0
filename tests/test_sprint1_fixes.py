@@ -1,0 +1,513 @@
+"""Sprint 1 — Prevent Data Loss in Core Workflows
+
+Tests grouped by the bug fix they verify:
+  C3  Chat session ID collision
+  C1  Chat history lost-update during SSE streaming
+  C2  Artifact save race — content overwrite
+  H1  No guard against concurrent deep research runs
+"""
+
+import threading
+from datetime import datetime, timedelta
+
+import pytest
+
+from services.storage import read_json, update_json, write_json
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_project(tmp_path, name="test_project"):
+    """Create a minimal project directory and patch get_project_dir to use it."""
+    project_dir = tmp_path / "projects" / name
+    project_dir.mkdir(parents=True)
+    (project_dir / "files").mkdir()
+    return project_dir
+
+
+@pytest.fixture()
+def project(tmp_path, monkeypatch):
+    """Yield a (project_name, project_dir) tuple with patched project root."""
+    name = "test_project"
+    project_dir = _make_project(tmp_path, name)
+    monkeypatch.setattr(
+        "services.project_service.get_projects_dir",
+        lambda: tmp_path / "projects",
+    )
+    return name, project_dir
+
+
+# ===========================================================================
+# C3 — Chat session ID collision (second-precision timestamps)
+# ===========================================================================
+
+class TestC3_ChatIdCollision:
+
+    def test_chat_id_contains_random_suffix(self, project):
+        """New chat IDs must include a random hex suffix after the timestamp."""
+        from services.chat_service import create_new_chat
+
+        chat_id = create_new_chat(project[0])
+        parts = chat_id.split("_")
+        # Format: YYYYMMDD_HHMMSS_<hex>
+        assert len(parts) == 3, f"Expected 3 parts in chat_id, got {parts}"
+        assert len(parts[2]) == 8, f"Hex suffix should be 8 chars, got '{parts[2]}'"
+
+    def test_ten_rapid_creates_all_unique(self, project):
+        """10 create_new_chat calls in a tight loop must all produce distinct IDs."""
+        from services.chat_service import create_new_chat
+
+        ids = [create_new_chat(project[0]) for _ in range(10)]
+        assert len(set(ids)) == 10, f"Duplicate IDs found: {ids}"
+
+    def test_concurrent_creates_all_unique(self, project):
+        """Threads creating chats simultaneously must never collide."""
+        from services.chat_service import create_new_chat
+
+        ids = []
+        lock = threading.Lock()
+
+        def create():
+            cid = create_new_chat(project[0])
+            with lock:
+                ids.append(cid)
+
+        threads = [threading.Thread(target=create) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(set(ids)) == 10, f"Duplicate IDs in concurrent creation: {ids}"
+
+    def test_old_format_chat_ids_still_work(self, project):
+        """Projects with old-format IDs (YYYYMMDD_HHMMSS) must load without migration."""
+        from services.chat_service import append_message_to_chat, load_chat_sessions
+
+        old_id = "20250115_143022"
+        chats_file = project[1] / "chat_history.json"
+        write_json(chats_file, {
+            old_id: {
+                "name": "Legacy chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "created": "2025-01-15T14:30:22",
+            }
+        })
+
+        sessions = load_chat_sessions(project[0])
+        assert old_id in sessions
+        assert len(sessions[old_id]["messages"]) == 1
+
+        # Appending to an old-format chat must also work
+        append_message_to_chat(project[0], old_id, {"role": "assistant", "content": "hi"})
+        sessions = load_chat_sessions(project[0])
+        assert len(sessions[old_id]["messages"]) == 2
+
+
+# ===========================================================================
+# C1 — Chat history lost-update during SSE streaming
+# ===========================================================================
+
+class TestC1_ChatHistoryLostUpdate:
+
+    def test_append_message_persists(self, project):
+        """append_message_to_chat must persist a message atomically."""
+        from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions
+
+        chat_id = create_new_chat(project[0])
+        append_message_to_chat(project[0], chat_id, {"role": "user", "content": "q1"})
+        append_message_to_chat(project[0], chat_id, {"role": "assistant", "content": "a1"})
+
+        sessions = load_chat_sessions(project[0])
+        msgs = sessions[chat_id]["messages"]
+        assert len(msgs) == 2
+        assert msgs[0] == {"role": "user", "content": "q1"}
+        assert msgs[1] == {"role": "assistant", "content": "a1"}
+
+    def test_concurrent_appends_no_lost_messages(self, project):
+        """Two threads appending to the same chat must both persist."""
+        from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions
+
+        chat_id = create_new_chat(project[0])
+        errors = []
+
+        def append_n(start, count):
+            try:
+                for i in range(count):
+                    append_message_to_chat(
+                        project[0], chat_id,
+                        {"role": "user", "content": f"msg-{start + i}"},
+                    )
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=append_n, args=(0, 10))
+        t2 = threading.Thread(target=append_n, args=(100, 10))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"Errors during concurrent appends: {errors}"
+        sessions = load_chat_sessions(project[0])
+        msgs = sessions[chat_id]["messages"]
+        assert len(msgs) == 20, f"Expected 20 messages, got {len(msgs)}"
+
+    def test_append_to_nonexistent_chat_is_noop(self, project):
+        """Appending to a deleted/missing chat must not crash or create a ghost entry."""
+        from services.chat_service import append_message_to_chat, load_chat_sessions
+
+        append_message_to_chat(project[0], "no_such_chat", {"role": "user", "content": "x"})
+        sessions = load_chat_sessions(project[0])
+        assert "no_such_chat" not in sessions
+
+    def test_update_json_atomicity(self, tmp_path):
+        """Multiple threads doing update_json on the same file must not lose updates."""
+        path = tmp_path / "counter.json"
+        write_json(path, {"count": 0})
+        errors = []
+
+        def increment(n):
+            try:
+                for _ in range(n):
+                    update_json(path, lambda d: {**d, "count": d["count"] + 1})
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=increment, args=(50,)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        result = read_json(path, None)
+        assert result["count"] == 200, f"Expected 200, got {result['count']} — lost updates"
+
+    def test_update_json_allows_in_place_mutation(self, tmp_path):
+        """Updater that mutates data in-place (returns None) must still persist."""
+        path = tmp_path / "data.json"
+        write_json(path, {"items": []})
+
+        def add_item(data):
+            data["items"].append("new")
+
+        update_json(path, add_item)
+        assert read_json(path, None) == {"items": ["new"]}
+
+    def test_simulated_two_tab_streaming(self, project):
+        """Simulate C1 test scenario: two browser tabs sending messages to
+        the same chat concurrently, with streaming delays.
+
+        Tab A sends user_A, streams for a while, then saves assistant_A.
+        While Tab A streams, Tab B sends user_B, streams briefly, saves assistant_B.
+        All 4 messages must be present in chat_history.json afterward.
+        """
+        import time
+
+        from services.chat_service import (
+            append_message_to_chat,
+            create_new_chat,
+            load_chat_sessions,
+            load_chat_sessions_locked,
+        )
+
+        chat_id = create_new_chat(project[0])
+        errors = []
+
+        def tab_a():
+            try:
+                # Tab A reads sessions, appends user message
+                sessions = load_chat_sessions_locked(project[0])
+                assert chat_id in sessions
+                append_message_to_chat(project[0], chat_id,
+                                       {"role": "user", "content": "user_A"})
+                # Simulate long streaming delay
+                time.sleep(0.15)
+                # Tab A finishes streaming, appends assistant message
+                append_message_to_chat(project[0], chat_id,
+                                       {"role": "assistant", "content": "assistant_A"})
+            except Exception as e:
+                errors.append(("tab_a", e))
+
+        def tab_b():
+            try:
+                # Small delay so Tab A starts first
+                time.sleep(0.05)
+                # Tab B reads sessions (should see user_A already persisted)
+                sessions = load_chat_sessions_locked(project[0])
+                assert chat_id in sessions
+                append_message_to_chat(project[0], chat_id,
+                                       {"role": "user", "content": "user_B"})
+                # Tab B streams briefly
+                time.sleep(0.05)
+                # Tab B finishes streaming, appends assistant message
+                append_message_to_chat(project[0], chat_id,
+                                       {"role": "assistant", "content": "assistant_B"})
+            except Exception as e:
+                errors.append(("tab_b", e))
+
+        t1 = threading.Thread(target=tab_a)
+        t2 = threading.Thread(target=tab_b)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"Errors: {errors}"
+
+        # Verify all 4 messages are present in chat_history.json
+        sessions = load_chat_sessions(project[0])
+        msgs = sessions[chat_id]["messages"]
+        contents = [m["content"] for m in msgs]
+        assert "user_A" in contents, f"user_A missing from {contents}"
+        assert "user_B" in contents, f"user_B missing from {contents}"
+        assert "assistant_A" in contents, f"assistant_A missing from {contents}"
+        assert "assistant_B" in contents, f"assistant_B missing from {contents}"
+        assert len(msgs) == 4, f"Expected 4 messages, got {len(msgs)}: {contents}"
+
+    def test_read_json_reliable_retries_on_transient_error(self, tmp_path):
+        """_read_json_reliable must retry and succeed after transient I/O errors."""
+        from services.storage import _read_json_reliable, write_json
+
+        path = tmp_path / "data.json"
+        write_json(path, {"key": "value"})
+
+        # Should read successfully
+        result = _read_json_reliable(path, {})
+        assert result == {"key": "value"}
+
+    def test_read_json_reliable_returns_default_for_missing_file(self, tmp_path):
+        """_read_json_reliable must return default when file does not exist."""
+        from services.storage import _read_json_reliable
+
+        path = tmp_path / "nonexistent.json"
+        result = _read_json_reliable(path, {"default": True})
+        assert result == {"default": True}
+
+
+# ===========================================================================
+# C2 — Artifact save race — content overwrite
+# ===========================================================================
+
+class TestC2_ArtifactSaveRace:
+
+    def test_unique_md_filename_reserves_file(self, project):
+        """_unique_md_filename must create a placeholder to prevent collisions."""
+        from routes.artifacts import _unique_md_filename
+
+        files_dir = project[1] / "files"
+        name1 = _unique_md_filename(project[0], "Report")
+        assert (files_dir / name1).exists(), "Placeholder file should exist"
+
+    def test_unique_md_filename_no_collision(self, project):
+        """Two calls with the same base name must return different filenames."""
+        from routes.artifacts import _unique_md_filename
+
+        name1 = _unique_md_filename(project[0], "Report")
+        name2 = _unique_md_filename(project[0], "Report")
+        assert name1 != name2, f"Both calls returned '{name1}'"
+
+    def test_concurrent_unique_filenames(self, project):
+        """Threads calling _unique_md_filename simultaneously get distinct names."""
+        from routes.artifacts import _unique_md_filename
+
+        names = []
+        lock = threading.Lock()
+
+        def get_name():
+            n = _unique_md_filename(project[0], "Analysis")
+            with lock:
+                names.append(n)
+
+        threads = [threading.Thread(target=get_name) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(set(names)) == 8, f"Duplicate filenames: {names}"
+
+    def test_artifact_lock_serialises_saves(self):
+        """_get_artifact_lock returns the same lock for the same project."""
+        from routes.artifacts import _get_artifact_lock
+
+        lock_a = _get_artifact_lock("proj_a")
+        lock_a2 = _get_artifact_lock("proj_a")
+        lock_b = _get_artifact_lock("proj_b")
+
+        assert lock_a is lock_a2, "Same project should get the same lock"
+        assert lock_a is not lock_b, "Different projects should get different locks"
+
+
+# ===========================================================================
+# H1 — Duplicate deep research run prevention (prompt-based debounce)
+# ===========================================================================
+
+class TestH1_DeepResearchGuard:
+
+    def test_duplicate_prompt_blocked(self, project):
+        """Same prompt submitted twice within debounce window is rejected."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_abc": {
+                "id": "run_abc",
+                "status": "running",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Analyse competitor landscape") is True
+
+    def test_different_prompt_allowed(self, project):
+        """A different prompt is allowed even while another run is active."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_abc": {
+                "id": "run_abc",
+                "status": "running",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Student demand analysis") is False
+
+    def test_no_runs_not_duplicate(self, project):
+        """No runs exist — any prompt is allowed."""
+        from services.research_run_service import is_duplicate_run
+
+        assert is_duplicate_run(project[0], "Any prompt") is False
+
+    def test_completed_run_same_prompt_allowed(self, project):
+        """A completed run with the same prompt does not block a re-run."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_done": {
+                "id": "run_done",
+                "status": "completed",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
+
+    def test_old_run_same_prompt_allowed(self, project):
+        """A run outside the debounce window with the same prompt is allowed (re-run)."""
+        from services.research_run_service import is_duplicate_run
+
+        old_time = (datetime.now() - timedelta(seconds=60)).isoformat()
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_old": {
+                "id": "run_old",
+                "status": "running",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": old_time,
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
+
+    def test_queued_duplicate_blocked(self, project):
+        """A queued run with the same prompt also counts as a duplicate."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_q": {
+                "id": "run_q",
+                "status": "queued",
+                "prompt_preview": "Market sizing",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Market sizing") is True
+
+    def test_cancelled_run_does_not_block(self, project):
+        """A cancelled run with the same prompt does not block."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_c": {
+                "id": "run_c",
+                "status": "cancelled",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
+
+    def test_failed_run_does_not_block(self, project):
+        """A failed run with the same prompt does not block a retry."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_f": {
+                "id": "run_f",
+                "status": "failed",
+                "prompt_preview": "Analyse competitor landscape",
+                "created_at": datetime.now().isoformat(),
+            }
+        })
+
+        assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
+
+    def test_parallel_different_prompts_both_allowed(self, project):
+        """Two active runs with different prompts — a third different prompt is allowed."""
+        from services.research_run_service import is_duplicate_run
+
+        runs_file = project[1] / "research_runs.json"
+        write_json(runs_file, {
+            "run_1": {
+                "id": "run_1",
+                "status": "running",
+                "prompt_preview": "Competitor analysis",
+                "created_at": datetime.now().isoformat(),
+            },
+            "run_2": {
+                "id": "run_2",
+                "status": "running",
+                "prompt_preview": "Student demand",
+                "created_at": datetime.now().isoformat(),
+            },
+        })
+
+        assert is_duplicate_run(project[0], "Marketing channels") is False
+        assert is_duplicate_run(project[0], "Competitor analysis") is True
+
+    def test_concurrent_run_creation_persists_all_runs(self, project):
+        """Concurrent create_run calls must not overwrite each other on disk."""
+        from services.research_run_service import create_run, load_runs
+
+        created_ids = []
+        lock = threading.Lock()
+
+        def create(idx):
+            run_id = create_run(project[0], f"resp-{idx}", None, f"prompt {idx}")
+            with lock:
+                created_ids.append(run_id)
+
+        threads = [threading.Thread(target=create, args=(idx,)) for idx in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        runs = load_runs(project[0])
+        assert len(created_ids) == 12
+        assert len(runs) == 12, f"Expected 12 persisted runs, found {len(runs)}"
+        assert set(created_ids) == set(runs.keys())

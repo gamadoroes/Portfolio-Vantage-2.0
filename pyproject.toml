@@ -1,0 +1,22 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names, etc.)
+    "I",   # isort (import ordering)
+    "B",   # flake8-bugbear (common bug patterns)
+    "UP",  # pyupgrade (modernize syntax)
+]
+ignore = [
+    "E501",  # line too long — handled by formatter if needed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F811"]  # allow pytest fixture redefinition
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
