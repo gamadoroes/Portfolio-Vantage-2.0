@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Research Architect — a Flask single-page app for competitive landscape analysis in Australian higher education. Integrates Anthropic Claude (chat/edit) and OpenAI deep research APIs. All data is file-based (no database); projects live under `projects/{name}/` as JSON and plain text files.
 
+For a full breakdown of routes/services/data model, the Deep Research lifecycle, and which parts of the Phase 1–7 workflow currently live in the backend vs. the browser, see `docs/ARCHITECTURE.md`.
+
 ## Commands
 
 ```bash
@@ -65,7 +67,7 @@ Each project directory contains:
 - **Atomic writes** in `storage.py`: temp file → lock → `os.replace()` → retry with backoff (handles OneDrive locks)
 - **API endpoints** follow `/api/{resource}` pattern
 - **Project context** stored in Flask session (`current_project`) and client-side localStorage
-- **7 research phases** are hard-coded: Landscape, Student, Marketing, Product, Academic, Industry, Options
+- **7 research phases** (Landscape, Student, Marketing, Product, Academic, Industry, Options) are hard-coded **client-side only**, in `static/app.js`'s `PHASE_DEFINITIONS` (plus the per-phase prompt/guidance/boundary text also in app.js). The Python backend has no knowledge of phase identity or meaning — it only hides `insights.json` from file listings and prunes dangling references in it. See `docs/ARCHITECTURE.md` §7-10 before moving any of this server-side.
 
 ## Configuration
 
