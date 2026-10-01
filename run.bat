@@ -8,7 +8,8 @@ set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 
 if not exist "%VENV_PYTHON%" (
     echo Creating virtual environment...
-"C:\Users\admin-ai-testing3\AppData\Local\Python\bin\python.exe" -m venv "%VENV_DIR%"    if errorlevel 1 python -m venv "%VENV_DIR%"
+    py -3 -m venv "%VENV_DIR%" 2>nul
+    if errorlevel 1 python -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo Failed to create a virtual environment.
         pause
