@@ -16,7 +16,7 @@ def isolated_projects(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def client(isolated_projects):
+def client(isolated_projects, temp_db):
     app.config["TESTING"] = True
     with app.test_client() as client:
         yield client

@@ -1,7 +1,7 @@
-from datetime import datetime
 from pathlib import Path
 
-from .storage import read_json, write_json, read_text, write_text
+from .storage import read_text, write_text
+from db.repositories import projects_repo, sources_repo
 
 _INVALID_PATH_CHARS = set('<>:"/\\|?*')
 _WINDOWS_RESERVED_NAMES = {
@@ -76,9 +76,7 @@ def is_valid_project_name(project_name):
 
 
 def list_projects():
-    projects_dir = get_projects_dir()
-    projects_dir.mkdir(parents=True, exist_ok=True)
-    return sorted(d.name for d in projects_dir.iterdir() if d.is_dir())
+    return [p["name"] for p in projects_repo.list_all()]
 
 
 def get_project_dir(project_name):
@@ -126,77 +124,80 @@ def get_project_file_path(project_name, filename):
 
 
 def project_exists(project_name):
-    project_dir = get_project_dir(project_name)
-    return bool(project_dir and project_dir.is_dir())
+    normalized = normalize_project_name(project_name)
+    return bool(normalized and projects_repo.exists(normalized))
 
 
 def create_project(project_name):
     normalized = normalize_project_name(project_name)
     if normalized is None:
         raise ValueError("Invalid project name.")
+    if projects_repo.exists(normalized):
+        return False
 
     project_dir = get_project_dir(normalized)
     if project_dir is None:
         raise ValueError("Invalid project name.")
-    if project_dir.exists():
-        return False
-
     project_dir.parent.mkdir(parents=True, exist_ok=True)
-    project_dir.mkdir(exist_ok=False)
+    project_dir.mkdir(exist_ok=True)
     (project_dir / "files").mkdir(exist_ok=True)
     (project_dir / "outputs").mkdir(exist_ok=True)
 
-    config = {
-        "name": normalized,
-        "created": datetime.now().isoformat(),
-        "selected_files": [],
-        "selected_file_ids": [],
-    }
-    save_project_config(normalized, config)
-    write_json(project_dir / "artifacts.json", {})
+    projects_repo.get_or_create_id(normalized)
     return True
 
 
 def load_project_config(project_name):
-    config_path = get_project_path(project_name, "config.json")
-    if config_path is None:
+    project_id = projects_repo.get_id(project_name)
+    if project_id is None:
         return {}
-    return read_json(config_path, {})
+    selected_ids = sources_repo.list_selected_ids(project_id)
+    sources_by_id = {s["id"]: s for s in sources_repo.list_for_project(project_id)}
+    selected_files = [sources_by_id[sid]["filename"] for sid in selected_ids if sid in sources_by_id]
+    selected_file_ids = [
+        sources_by_id[sid]["stable_file_id"] for sid in selected_ids if sid in sources_by_id
+    ]
+    return {
+        "name": project_name,
+        "created": projects_repo.get_created_at(project_name),
+        "selected_files": selected_files,
+        "selected_file_ids": selected_file_ids,
+    }
 
 
 def save_project_config(project_name, config):
-    config_path = get_project_path(project_name, "config.json")
-    if config_path is None:
-        raise ValueError("Invalid project name.")
-    write_json(config_path, config)
+    project_id = projects_repo.get_or_create_id(project_name)
+    target_stable_ids = set(config.get("selected_file_ids", []))
+    current_selected_ids = set(sources_repo.list_selected_ids(project_id))
+    sources_by_stable_id = {
+        s["stable_file_id"]: s for s in sources_repo.list_for_project(project_id)
+    }
+    target_ids = {
+        sources_by_stable_id[sid]["id"]
+        for sid in target_stable_ids
+        if sid in sources_by_stable_id
+    }
+    for source_id in target_ids - current_selected_ids:
+        sources_repo.set_selected(project_id, source_id, True)
+    for source_id in current_selected_ids - target_ids:
+        sources_repo.set_selected(project_id, source_id, False)
 
 
 def get_project_metadata(project_name):
-    metadata_file = get_project_path(project_name, "metadata.json")
-    if metadata_file is None:
-        return {"description": "", "archived": False}
-    return read_json(metadata_file, {"description": "", "archived": False})
+    return projects_repo.get_metadata(project_name)
 
 
 def save_project_metadata(project_name, metadata):
-    metadata_file = get_project_path(project_name, "metadata.json")
-    if metadata_file is None:
-        raise ValueError("Invalid project name.")
-    write_json(metadata_file, metadata)
+    projects_repo.save_metadata(
+        project_name, metadata.get("description", ""), bool(metadata.get("archived", False))
+    )
 
 
 def list_projects_with_metadata():
-    projects = []
-    for project_name in list_projects():
-        metadata = get_project_metadata(project_name)
-        projects.append(
-            {
-                "name": project_name,
-                "description": metadata.get("description", ""),
-                "archived": metadata.get("archived", False),
-            }
-        )
-    return projects
+    return [
+        {"name": p["name"], "description": p["description"], "archived": p["archived"]}
+        for p in projects_repo.list_all()
+    ]
 
 
 def load_project_prompt(project_name, prompt_type):

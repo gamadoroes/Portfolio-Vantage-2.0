@@ -75,7 +75,7 @@ def test_reconcile_removes_stale_selected_files(mock_dir, mock_reconcile, mock_l
 
 @patch("services.reference_integrity_service.reconcile_file_index")
 @patch("services.reference_integrity_service.get_project_dir")
-def test_reconcile_cleans_phase_links(mock_dir, mock_reconcile, tmp_path):
+def test_reconcile_cleans_phase_links(mock_dir, mock_reconcile, temp_db, tmp_path):
     insights = {
         "phases": {
             "Landscape": {
@@ -101,7 +101,7 @@ def test_reconcile_cleans_phase_links(mock_dir, mock_reconcile, tmp_path):
 
 @patch("services.reference_integrity_service.reconcile_file_index")
 @patch("services.reference_integrity_service.get_project_dir")
-def test_reconcile_no_changes_when_clean(mock_dir, mock_reconcile, tmp_path):
+def test_reconcile_no_changes_when_clean(mock_dir, mock_reconcile, temp_db, tmp_path):
     config = {
         "name": "proj",
         "selected_files": ["a.txt"],
