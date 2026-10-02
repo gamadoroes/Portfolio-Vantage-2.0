@@ -148,7 +148,10 @@ def create_project(project_name):
 
 
 def load_project_config(project_name):
-    project_id = projects_repo.get_id(project_name)
+    normalized = normalize_project_name(project_name)
+    if normalized is None:
+        raise ValueError("Invalid project name.")
+    project_id = projects_repo.get_id(normalized)
     if project_id is None:
         return {}
     selected_ids = sources_repo.list_selected_ids(project_id)
@@ -158,15 +161,18 @@ def load_project_config(project_name):
         sources_by_id[sid]["stable_file_id"] for sid in selected_ids if sid in sources_by_id
     ]
     return {
-        "name": project_name,
-        "created": projects_repo.get_created_at(project_name),
+        "name": normalized,
+        "created": projects_repo.get_created_at(normalized),
         "selected_files": selected_files,
         "selected_file_ids": selected_file_ids,
     }
 
 
 def save_project_config(project_name, config):
-    project_id = projects_repo.get_or_create_id(project_name)
+    normalized = normalize_project_name(project_name)
+    if normalized is None:
+        raise ValueError("Invalid project name.")
+    project_id = projects_repo.get_or_create_id(normalized)
     target_stable_ids = set(config.get("selected_file_ids", []))
     current_selected_ids = set(sources_repo.list_selected_ids(project_id))
     sources_by_stable_id = {
@@ -184,12 +190,18 @@ def save_project_config(project_name, config):
 
 
 def get_project_metadata(project_name):
-    return projects_repo.get_metadata(project_name)
+    normalized = normalize_project_name(project_name)
+    if normalized is None:
+        raise ValueError("Invalid project name.")
+    return projects_repo.get_metadata(normalized)
 
 
 def save_project_metadata(project_name, metadata):
+    normalized = normalize_project_name(project_name)
+    if normalized is None:
+        raise ValueError("Invalid project name.")
     projects_repo.save_metadata(
-        project_name, metadata.get("description", ""), bool(metadata.get("archived", False))
+        normalized, metadata.get("description", ""), bool(metadata.get("archived", False))
     )
 
 
