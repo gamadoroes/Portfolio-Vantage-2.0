@@ -55,6 +55,14 @@ def rename(source_id, new_filename):
 def delete(source_id):
     with get_connection() as conn:
         conn.execute("DELETE FROM project_selected_sources WHERE source_id = ?", (source_id,))
+        # Detach (don't delete) any evidence rows pointing at this source first:
+        # evidence.source_id has no ON DELETE clause and foreign_keys=ON, so
+        # deleting a source that's still referenced by evidence would raise
+        # sqlite3.IntegrityError. Setting source_id to NULL preserves the
+        # evidence/finding_evidence rows -- and therefore historical insight
+        # versions -- intact; it only degrades the citation from "backed by a
+        # real uploaded file" to an orphaned/freeform one.
+        conn.execute("UPDATE evidence SET source_id = NULL WHERE source_id = ?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
 
 

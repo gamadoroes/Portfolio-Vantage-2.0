@@ -1,4 +1,4 @@
-from db.repositories import projects_repo, sources_repo
+from db.repositories import projects_repo, research_tasks_repo, sources_repo
 
 
 def test_upsert_creates_then_reuses(temp_db):
@@ -48,3 +48,26 @@ def test_delete_source_also_unselects_it(temp_db):
     sources_repo.set_selected(pid, sid, True)
     sources_repo.delete(sid)
     assert sources_repo.list_selected_ids(pid) == []
+
+
+def test_delete_source_linked_as_evidence_does_not_raise(temp_db):
+    """Regression test: evidence.source_id has no ON DELETE clause and
+    foreign_keys=ON, so deleting a source still referenced by an evidence row
+    used to raise sqlite3.IntegrityError. delete() must detach (not cascade-
+    delete) the evidence instead, so the finding/evidence/historical-version
+    record survives with source_id now NULL.
+    """
+    pid = projects_repo.get_or_create_id("P")
+    tid = research_tasks_repo.get_or_create_task(pid, "1", "The Landscape")
+    vid = research_tasks_repo.create_version(pid, 1, "2026-01-01T00:00:00", "[]", "")
+    fid = research_tasks_repo.create_finding(tid, vid, "Summary", None, "medium")
+    sid = sources_repo.upsert(pid, "f_abc", "doc.txt")
+    eid = research_tasks_repo.create_evidence(pid, None, source_id=sid)
+    research_tasks_repo.link_finding_evidence(fid, eid)
+
+    sources_repo.delete(sid)  # must not raise
+
+    evidence_rows = research_tasks_repo.list_evidence_for_finding(fid)
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0]["id"] == eid
+    assert evidence_rows[0]["source_id"] is None
