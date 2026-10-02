@@ -103,9 +103,8 @@ def rename_file():
         # row, and load_artifacts() reconstructs each artifact's "filename" live
         # from that row via the source_id FK -- so by the time we load here, an
         # artifact that *was* backed by old_name already reports new_name, not
-        # old_name. Match on new_name (not old_name) to find it; rename_project_file
-        # succeeding above guarantees new_name didn't already belong to another file
-        # (and thus another artifact) before this request.
+        # old_name. Match on new_name (not old_name) to find the artifact(s) whose
+        # backing source was just renamed.
         artifacts = load_artifacts(project)
         changed = False
         for art in artifacts.values():
