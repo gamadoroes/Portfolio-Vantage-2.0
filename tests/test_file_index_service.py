@@ -138,6 +138,39 @@ def test_get_file_id_returns_correct_id(mock_dir, temp_db, tmp_path):
     entries = reconcile_file_index("proj")
     file_id = get_file_id("proj", "doc.pdf", entries)
     assert file_id in entries
+    assert get_file_id("proj", "nonexistent.txt", entries) is None
+
+
+@patch("services.file_index_service.get_project_dir")
+def test_reconcile_removes_deleted_files(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt", "b.txt"])
+    mock_dir.return_value = project_dir
+
+    reconcile_file_index("proj")
+    (project_dir / "files" / "a.txt").unlink()
+
+    entries = reconcile_file_index("proj")
+    filenames = {rec["filename"] for rec in entries.values()}
+    assert "a.txt" not in filenames
+    assert "b.txt" in filenames
+
+
+@patch("services.file_index_service.get_project_dir")
+def test_remove_file_from_index(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt"])
+    mock_dir.return_value = project_dir
+
+    entries = reconcile_file_index("proj")
+    file_id = get_file_id("proj", "a.txt", entries)
+
+    removed_id = remove_file_from_index("proj", "a.txt")
+    assert removed_id == file_id
+
+    entries_after = reconcile_file_index("proj")
+    assert file_id not in entries_after
+    # a.txt still exists on disk, so reconcile re-adds it under a new id.
+    filenames = {rec["filename"] for rec in entries_after.values()}
+    assert "a.txt" in filenames
 
 
 @patch("services.file_index_service.get_project_dir")
@@ -148,9 +181,34 @@ def test_rename_preserves_id(mock_dir, temp_db, tmp_path):
     file_id = get_file_id("proj", "old.txt", entries)
 
     (project_dir / "files" / "old.txt").rename(project_dir / "files" / "new.txt")
+    result = rename_file_in_index("proj", "old.txt", "new.txt")
+    assert result is True
+
+    entries_after = reconcile_file_index("proj")
+    assert entries_after[file_id]["filename"] == "new.txt"
+    assert len(entries_after) == 1
+
+
+@patch("services.file_index_service.get_project_dir")
+def test_rename_file_in_index_disk_renamed_before_call_no_duplicate(mock_dir, temp_db, tmp_path):
+    """Regression test for the bug where rename_file_in_index rescanned disk
+    (via reconcile_file_index) after routes/files.py had already renamed the
+    file on disk. That rescan saw new_name as brand new and minted it a fresh
+    source row, while the stale old_name row was still found and renamed too
+    -- leaving two rows for the same file. This mirrors the real call order:
+    disk rename happens first, then rename_file_in_index is called."""
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["old.txt", "other.txt"])
+    mock_dir.return_value = project_dir
+    entries = reconcile_file_index("proj")
+    file_id = get_file_id("proj", "old.txt", entries)
+
+    (project_dir / "files" / "old.txt").rename(project_dir / "files" / "new.txt")
     rename_file_in_index("proj", "old.txt", "new.txt")
 
     entries_after = reconcile_file_index("proj")
+    assert len(entries_after) == 2
+    filenames = {rec["filename"] for rec in entries_after.values()}
+    assert filenames == {"new.txt", "other.txt"}
     assert entries_after[file_id]["filename"] == "new.txt"
 
 
@@ -170,6 +228,19 @@ def test_toggle_selected_file(mock_dir, temp_db, tmp_path):
 def reconcile_selected_file_ids_for_test(project_name):
     from services.file_index_service import reconcile_selected_file_ids
     return reconcile_selected_file_ids(project_name)["selected_file_ids"]
+
+
+@patch("services.file_index_service.get_project_dir")
+def test_resolve_file_refs_handles_ids_and_names(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt", "b.txt"])
+    mock_dir.return_value = project_dir
+
+    entries = reconcile_file_index("proj")
+    a_id = get_file_id("proj", "a.txt", entries)
+
+    # Mix of a stable ID and a bare, valid filename passed directly.
+    result = resolve_file_refs_to_names("proj", [a_id, "b.txt"], entries)
+    assert set(result) == {"a.txt", "b.txt"}
 
 
 @patch("services.file_index_service.get_project_dir")

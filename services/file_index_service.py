@@ -86,6 +86,18 @@ def reconcile_file_index(project_name):
     existing = _existing_files(project_name)
     entries = _entries_for_project(project_id)
 
+    # Drop index rows for files no longer on disk. Safe to do here because
+    # rename_file_in_index no longer calls reconcile_file_index mid-rename
+    # (see that function) -- there is no in-flight-rename race to walk into.
+    to_delete = [file_id for file_id, rec in entries.items() if rec["filename"] not in existing]
+    for file_id in to_delete:
+        source = sources_repo.get_by_stable_id(project_id, file_id)
+        if source is not None:
+            sources_repo.delete(source["id"])
+
+    if to_delete:
+        entries = _entries_for_project(project_id)
+
     indexed_names = {rec["filename"] for rec in entries.values()}
     for filename in sorted(existing):
         if filename in indexed_names:
@@ -122,12 +134,15 @@ def rename_file_in_index(project_name, old_name, new_name):
     if not old_name or not new_name or old_name == new_name:
         return False
     project_id = projects_repo.get_or_create_id(project_name)
-    entries = reconcile_file_index(project_name)
-    target_id = get_file_id(project_name, old_name, entries)
-    if not target_id:
+    # Look up the row directly by the OLD filename instead of calling
+    # reconcile_file_index: callers (routes/files.py) rename the file on disk
+    # BEFORE calling this function, so a disk rescan at this point would see
+    # new_name as "new" and mint a duplicate source row for it, while the
+    # stale old_name row would still be found and renamed too.
+    source = sources_repo.get_by_filename(project_id, old_name)
+    if source is None:
         ensure_file_id(project_name, new_name)
         return False
-    source = sources_repo.get_by_stable_id(project_id, target_id)
     sources_repo.rename(source["id"], new_name)
     return True
 
@@ -141,6 +156,8 @@ def remove_file_from_index(project_name, filename):
     if not target_id:
         return None
     source = sources_repo.get_by_stable_id(project_id, target_id)
+    if source is None:
+        return None
     sources_repo.delete(source["id"])
     return target_id
 
@@ -217,6 +234,8 @@ def toggle_selected_file(project_name, filename=None, file_id=None):
         return None
 
     source = sources_repo.get_by_stable_id(project_id, target_stable_id)
+    if source is None:
+        return None
     currently_selected = source["id"] in sources_repo.list_selected_ids(project_id)
     sources_repo.set_selected(project_id, source["id"], not currently_selected)
     return not currently_selected
