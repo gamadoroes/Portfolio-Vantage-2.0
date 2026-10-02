@@ -41,6 +41,30 @@ def test_save_then_load_current_round_trips_phase_1(temp_db):
     assert loaded["phases"]["2"]["summary"] == "MISSING"
 
 
+def test_distinct_phase_summaries_do_not_get_mixed_up(temp_db):
+    # Guards against the exact bug class caught during planning: if _build_phase_data
+    # (or anything upstream) ever used list_findings_for_version()[0]-style lookup
+    # instead of get_finding_for_task_in_version(task_id, version_id), two phases with
+    # distinct real data would risk returning each other's finding. Both phase 1 and
+    # phase 2 get distinct, real summaries here so a mix-up fails immediately rather
+    # than being masked by one phase being left at "MISSING".
+    data = _sample_data()
+    data["phases"]["1"]["summary"] = "Landscape summary"
+    data["phases"]["2"]["summary"] = "Student summary"
+    data["phases"]["2"]["confidence"] = "high"
+    data["phases"]["2"]["gaps"] = ["Student gap"]
+
+    insights_service.save_insights("P", data)
+    loaded = insights_service.load_current_insights("P")
+
+    assert loaded["phases"]["1"]["summary"] == "Landscape summary"
+    assert loaded["phases"]["2"]["summary"] == "Student summary"
+    assert loaded["phases"]["2"]["confidence"] == "high"
+    assert loaded["phases"]["2"]["gaps"] == ["Student gap"]
+    # Untouched phases are still unaffected
+    assert loaded["phases"]["3"]["summary"] == "MISSING"
+
+
 def test_save_twice_creates_two_versions_and_history_preserves_first(temp_db):
     insights_service.save_insights("P", _sample_data(summary="Version 1 summary"))
     insights_service.save_insights("P", _sample_data(summary="Version 2 summary"))
