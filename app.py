@@ -15,6 +15,9 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
+    from db.connection import set_database_path
+    set_database_path(app.config["DATABASE_PATH"])
+
     app.register_blueprint(main_bp)
     app.register_blueprint(projects_bp)
     app.register_blueprint(files_bp)

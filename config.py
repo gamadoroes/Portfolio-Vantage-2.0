@@ -14,3 +14,5 @@ class Config:
     ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
     OPENAI_DEEP_RESEARCH_MODEL = os.environ.get("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research")
 
+    DATABASE_PATH = os.environ.get("DATABASE_PATH", "instance/app.db")
+
