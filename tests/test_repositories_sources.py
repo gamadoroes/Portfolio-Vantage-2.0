@@ -1,4 +1,4 @@
-from db.repositories import projects_repo, research_tasks_repo, sources_repo
+from db.repositories import artefacts_repo, projects_repo, research_tasks_repo, sources_repo
 
 
 def test_upsert_creates_then_reuses(temp_db):
@@ -71,3 +71,21 @@ def test_delete_source_linked_as_evidence_does_not_raise(temp_db):
     assert len(evidence_rows) == 1
     assert evidence_rows[0]["id"] == eid
     assert evidence_rows[0]["source_id"] is None
+
+
+def test_delete_source_referenced_by_artefact_does_not_raise(temp_db):
+    """Regression test: artefacts.source_id has no ON DELETE clause either
+    (same as evidence.source_id), and foreign_keys=ON, so deleting a source
+    still referenced by an artefact row also used to raise
+    sqlite3.IntegrityError. delete() must detach the artefact's source_id
+    instead of cascading, so the artefact row survives with source_id NULL.
+    """
+    pid = projects_repo.get_or_create_id("P")
+    sid = sources_repo.upsert(pid, "f_abc", "doc.txt")
+    artefacts_repo.upsert("art_1", pid, "My Artefact", source_id=sid)
+
+    sources_repo.delete(sid)  # must not raise
+
+    artefact = artefacts_repo.get("art_1")
+    assert artefact is not None
+    assert artefact["source_id"] is None
