@@ -98,16 +98,23 @@ def rename_file():
         rename_file_in_index(project, old_name, new_name)
         replace_file_references(project, old_name, new_name)
 
-        # Update any artifact whose backing file was renamed
+        # Update the display name of any artifact whose backing file was renamed.
+        # Note: rename_file_in_index() above already renamed the linked `sources`
+        # row, and load_artifacts() reconstructs each artifact's "filename" live
+        # from that row via the source_id FK -- so by the time we load here, an
+        # artifact that *was* backed by old_name already reports new_name, not
+        # old_name. Match on new_name (not old_name) to find it; rename_project_file
+        # succeeding above guarantees new_name didn't already belong to another file
+        # (and thus another artifact) before this request.
         artifacts = load_artifacts(project)
         changed = False
         for art in artifacts.values():
-            if art.get("filename") == old_name:
-                art["filename"] = new_name
+            if art.get("filename") == new_name:
                 # Derive a display name from the new filename (strip extension)
                 stem = new_name.rsplit(".", 1)[0] if "." in new_name else new_name
-                art["name"] = stem
-                changed = True
+                if art.get("name") != stem:
+                    art["name"] = stem
+                    changed = True
         if changed:
             save_artifacts(project, artifacts)
 
