@@ -64,11 +64,19 @@ def _migrate_project_core(project_dir, project_name):
             continue  # already migrated on a prior run -- skip, don't re-append messages
         chat_repo.create_session(chat_id, project_id, session.get("name", chat_id))
         for message in session.get("messages", []):
+            artefact_id = message.get("artifact_id")
+            if artefact_id is not None and artefacts_repo.get(artefact_id) is None:
+                # Same drift pattern as the chat_id/research_run case: the
+                # old JSON storage never enforced referential integrity
+                # between chat_history.json and artifacts.json, so a
+                # message can reference an artifact that was since
+                # deleted. Drop the dangling backlink rather than crash.
+                artefact_id = None
             chat_repo.append_message(
                 chat_id,
                 message.get("role", "user"),
                 message.get("content", ""),
-                artefact_id=message.get("artifact_id"),
+                artefact_id=artefact_id,
             )
 
     research_runs = _read_json(project_dir / "research_runs.json", {})
@@ -92,9 +100,17 @@ def _migrate_project_core(project_dir, project_name):
             run.get("prompt_preview", ""),
             status=run.get("status", "completed"),
         )
+        run_artefact_id = run.get("artifact_id")
+        if run_artefact_id is not None and artefacts_repo.get(run_artefact_id) is None:
+            # Same drift pattern as the chat_id case above: the old JSON
+            # storage never enforced referential integrity between
+            # research_runs.json and artifacts.json, so a run can
+            # reference an artifact that was since deleted. Drop the
+            # dangling backlink rather than crash the FK-enforced UPDATE.
+            run_artefact_id = None
         research_runs_repo.update(
             run_id,
-            artefact_id=run.get("artifact_id"),
+            artefact_id=run_artefact_id,
             error=run.get("error"),
             completed_at=run.get("completed_at"),
         )

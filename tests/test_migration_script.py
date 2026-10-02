@@ -196,3 +196,101 @@ def test_migrates_research_run_with_dangling_chat_id_without_crashing(temp_db, t
     assert migrated_run["response_id"] == "resp_123"
     assert migrated_run["status"] == "completed"
     assert report["Dangling Chat Project"]["research_runs"] == 1
+
+
+def test_migrates_research_run_with_dangling_artifact_id_without_crashing(temp_db, tmp_path):
+    # Same drift pattern as the dangling chat_id case, but for
+    # research_runs.artifact_id -> artefacts.id. If artifacts.json doesn't
+    # contain the artifact a run claims to have produced (old JSON storage
+    # never enforced this either), the FK UPDATE must not crash the whole
+    # migration -- the run should migrate with artefact_id = None.
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Dangling Artifact Run Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "outputs").mkdir()
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Dangling Artifact Run Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    # artifacts.json has zero entries -- the referenced artifact_id is absent
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    (project_dir / "chat_history.json").write_text("{}", encoding="utf-8")
+    (project_dir / "research_runs.json").write_text(
+        json.dumps({
+            "run_2_dangling": {
+                "response_id": "resp_456",
+                "chat_id": None,
+                "prompt_preview": "another prompt",
+                "status": "completed",
+                "artifact_id": "art_does_not_exist",
+                "error": None,
+                "completed_at": "2026-01-01T00:00:00",
+            }
+        }),
+        encoding="utf-8",
+    )
+    (project_dir / "file_index.json").write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+
+    report = migrate_all_projects(str(projects_root))  # must not raise FOREIGN KEY constraint failed
+
+    pid = projects_repo.get_id("Dangling Artifact Run Project")
+    assert pid is not None
+    migrated_run = research_runs_repo.get("run_2_dangling")
+    assert migrated_run is not None
+    assert migrated_run["artefact_id"] is None
+    assert migrated_run["response_id"] == "resp_456"
+    assert migrated_run["status"] == "completed"
+    assert report["Dangling Artifact Run Project"]["research_runs"] == 1
+
+
+def test_migrates_chat_message_with_dangling_artifact_id_without_crashing(temp_db, tmp_path):
+    # Same drift pattern again, this time for
+    # project_messages.artefact_id -> artefacts.id. A chat message that
+    # claims to be linked to an artifact that doesn't exist in
+    # artifacts.json must not crash the INSERT -- the message should
+    # migrate with artefact_id = None.
+    from db.repositories import chat_repo
+
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Dangling Artifact Message Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "outputs").mkdir()
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Dangling Artifact Message Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    # artifacts.json has zero entries -- the referenced artifact_id is absent
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    (project_dir / "chat_history.json").write_text(
+        json.dumps({
+            "chat_dangling": {
+                "name": "Chat With Dangling Artifact",
+                "created": "2026-01-01T00:00:00",
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "here's your doc",
+                     "artifact_id": "art_does_not_exist"},
+                ],
+            }
+        }),
+        encoding="utf-8",
+    )
+    (project_dir / "research_runs.json").write_text("{}", encoding="utf-8")
+    (project_dir / "file_index.json").write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+
+    migrate_all_projects(str(projects_root))  # must not raise FOREIGN KEY constraint failed
+
+    pid = projects_repo.get_id("Dangling Artifact Message Project")
+    assert pid is not None
+    messages = chat_repo.list_messages("chat_dangling")
+    assert len(messages) == 2
+    assert messages[1]["artefact_id"] is None
+    assert messages[1]["content"] == "here's your doc"
