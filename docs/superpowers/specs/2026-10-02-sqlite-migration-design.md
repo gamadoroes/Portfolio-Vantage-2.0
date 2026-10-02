@@ -15,6 +15,7 @@ Replace the JSON-file-per-concern storage model (`projects/{name}/config.json`, 
 - No change to uploaded file or artefact *content* storage — `projects/{name}/files/` stays on disk.
 - No backend worker/scheduler introduced (out of scope; a separate, paused design exists for deep-research concurrency and is deliberately *not* part of this phase — see §9).
 - No requirement to get `research_tasks`/`evidence`/`findings`/`finding_evidence`/`agent_decisions` "right" in a product sense — today's app has no structured equivalent for these, so Phase 1 creates correct schema and a best-effort migration, not a finished feature.
+- `system_prompt.txt`/`project_prompt.txt` stay as plain text files — no table was requested for these, they're outside the JSON-file set this phase targets, and `project_service.save_project_prompt`/`load_project_prompt` are unchanged.
 
 ## 3. Key decisions (confirmed with user)
 
@@ -46,6 +47,17 @@ CREATE TABLE projects (
     archived    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE project_selected_sources (
+    project_id  INTEGER NOT NULL REFERENCES projects(id),
+    source_id   INTEGER NOT NULL REFERENCES sources(id),
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, source_id)
+    -- Replaces config.json's selected_files/selected_file_ids arrays (which files are
+    -- active as chat/insight context for this project). Found missing during plan
+    -- write-up self-review -- config.json is in the Goal's JSON-file list but this
+    -- field had no table.
 );
 
 CREATE TABLE sources (
@@ -185,7 +197,7 @@ CREATE TABLE excluded_competitors (
 
 1. Opens/creates `instance/app.db` (path from `DATABASE_PATH` config, default `instance/app.db`). Applies pending `db/migrations/NNNN_*.sql` files in order, tracked in `schema_migrations`. Re-running when fully applied is a no-op.
 2. Walks every `projects/*/` directory. For each:
-   - `config.json` + `metadata.json` → one `projects` row (upsert by `name`).
+   - `config.json` + `metadata.json` → one `projects` row (upsert by `name`); `config.json.selected_files`/`selected_file_ids` → `project_selected_sources` rows (resolved to `source_id` via `stable_file_id`/filename match against `sources`, inserted after `sources` are migrated for that project).
    - `file_index.json` → `sources` rows (upsert by `project_id, stable_file_id`).
    - `artifacts.json` → `artefacts` rows (upsert by `id`), linked to `sources` by matching the artefact's backing filename.
    - `chat_history.json` → one `chat_sessions` row per session key, `project_messages` rows per message (`seq` = original array position).
@@ -207,7 +219,7 @@ CREATE TABLE excluded_competitors (
 New `db/` package:
 - `db/connection.py` — context-managed `sqlite3` connection factory; sets `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`, a busy timeout.
 - `db/migrations/*.sql` — plain numbered SQL files (the schema in §4 split into an initial migration).
-- `db/repositories/` — one module per aggregate (`projects_repo.py`, `sources_repo.py`, `artefacts_repo.py`, `chat_repo.py`, `research_runs_repo.py`, `research_tasks_repo.py` covering tasks/findings/evidence/finding_evidence/insight_versions, `excluded_competitors_repo.py`, `agent_decisions_repo.py`). Plain functions over raw rows — no ORM.
+- `db/repositories/` — one module per aggregate (`projects_repo.py`, `sources_repo.py` covering sources + `project_selected_sources`, `artefacts_repo.py`, `chat_repo.py`, `research_runs_repo.py`, `research_tasks_repo.py` covering tasks/findings/evidence/finding_evidence/insight_versions, `excluded_competitors_repo.py`, `agent_decisions_repo.py`). Plain functions over raw rows — no ORM.
 
 Every existing `services/*.py` module keeps its current public function names, parameters, and return shapes unchanged; only internals swap from `storage.read_json/write_json/update_json` to repository calls. `services/storage.py` is deleted only after every service module has been cut over — not before, and not as part of this spec's first task.
 
