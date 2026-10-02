@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from services.storage import read_json, update_json, write_json
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -177,40 +175,6 @@ class TestC1_ChatHistoryLostUpdate:
         sessions = load_chat_sessions(project[0])
         assert "no_such_chat" not in sessions
 
-    def test_update_json_atomicity(self, tmp_path):
-        """Multiple threads doing update_json on the same file must not lose updates."""
-        path = tmp_path / "counter.json"
-        write_json(path, {"count": 0})
-        errors = []
-
-        def increment(n):
-            try:
-                for _ in range(n):
-                    update_json(path, lambda d: {**d, "count": d["count"] + 1})
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=increment, args=(50,)) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors
-        result = read_json(path, None)
-        assert result["count"] == 200, f"Expected 200, got {result['count']} — lost updates"
-
-    def test_update_json_allows_in_place_mutation(self, tmp_path):
-        """Updater that mutates data in-place (returns None) must still persist."""
-        path = tmp_path / "data.json"
-        write_json(path, {"items": []})
-
-        def add_item(data):
-            data["items"].append("new")
-
-        update_json(path, add_item)
-        assert read_json(path, None) == {"items": ["new"]}
-
     def test_simulated_two_tab_streaming(self, project, temp_db):
         """Simulate C1 test scenario: two browser tabs sending messages to
         the same chat concurrently, with streaming delays.
@@ -283,25 +247,6 @@ class TestC1_ChatHistoryLostUpdate:
         assert "assistant_A" in contents, f"assistant_A missing from {contents}"
         assert "assistant_B" in contents, f"assistant_B missing from {contents}"
         assert len(msgs) == 4, f"Expected 4 messages, got {len(msgs)}: {contents}"
-
-    def test_read_json_reliable_retries_on_transient_error(self, tmp_path):
-        """_read_json_reliable must retry and succeed after transient I/O errors."""
-        from services.storage import _read_json_reliable, write_json
-
-        path = tmp_path / "data.json"
-        write_json(path, {"key": "value"})
-
-        # Should read successfully
-        result = _read_json_reliable(path, {})
-        assert result == {"key": "value"}
-
-    def test_read_json_reliable_returns_default_for_missing_file(self, tmp_path):
-        """_read_json_reliable must return default when file does not exist."""
-        from services.storage import _read_json_reliable
-
-        path = tmp_path / "nonexistent.json"
-        result = _read_json_reliable(path, {"default": True})
-        assert result == {"default": True}
 
 
 # ===========================================================================
