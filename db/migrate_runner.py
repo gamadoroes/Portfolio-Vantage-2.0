@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -36,12 +37,18 @@ def apply_migrations():
                 continue
             try:
                 conn.execute("BEGIN")
-                # Execute SQL statements from migration file
+                # Parse and execute SQL statements from migration file
+                # using sqlite3.complete_statement() for proper SQL handling
+                # (correctly accounts for string literals, comments, triggers, etc.)
                 sql_content = path.read_text(encoding="utf-8")
-                for statement in sql_content.split(";"):
-                    statement = statement.strip()
-                    if statement:
-                        conn.execute(statement)
+                statement_buffer = ""
+                for line in sql_content.split("\n"):
+                    statement_buffer += line + "\n"
+                    if sqlite3.complete_statement(statement_buffer):
+                        # Execute the complete statement
+                        if statement_buffer.strip():
+                            conn.execute(statement_buffer)
+                        statement_buffer = ""
                 # Record successful migration
                 conn.execute(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
