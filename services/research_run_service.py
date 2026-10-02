@@ -1,105 +1,80 @@
 import secrets
 from datetime import datetime, timedelta
 
-from .project_service import get_project_path
-from .storage import read_json, update_json, write_json
+from db.repositories import projects_repo, research_runs_repo
+
+from .project_service import normalize_project_name
 
 
-def _runs_path(project_name):
-    return get_project_path(project_name, "research_runs.json")
+def _run_for_project(project_name, run_id):
+    """Return the research_runs row only if run_id exists AND belongs to project_name.
 
-
-def load_runs(project_name):
-    runs_path = _runs_path(project_name)
-    if runs_path is None:
-        return {}
-    return read_json(runs_path, {})
-
-
-def save_runs(project_name, runs):
-    runs_path = _runs_path(project_name)
-    if runs_path is None:
-        raise ValueError("Invalid project name.")
-    write_json(runs_path, runs)
+    Resolving by run_id alone would let a run_id from a different project
+    succeed against the wrong project, since run IDs are globally unique
+    strings, not scoped per project the way research_runs.json files used to be.
+    """
+    run_row = research_runs_repo.get(run_id)
+    if run_row is None:
+        return None
+    project_id = projects_repo.get_id(project_name)
+    if project_id is None or run_row["project_id"] != project_id:
+        return None
+    return run_row
 
 
 def create_run(project_name, response_id, chat_id, prompt_text):
-    runs_path = _runs_path(project_name)
-    if runs_path is None:
-        return None
-
-    created_run_id = [None]
+    normalized = normalize_project_name(project_name)
+    if normalized is None:
+        raise ValueError("Invalid project name.")
+    project_id = projects_repo.get_or_create_id(normalized)
     prompt_preview = (prompt_text[:200] + "...") if len(prompt_text) > 200 else prompt_text
-
-    def updater(runs):
+    run_id = f"run_{int(datetime.now().timestamp())}_{secrets.token_hex(4)}"
+    while research_runs_repo.get(run_id) is not None:
         run_id = f"run_{int(datetime.now().timestamp())}_{secrets.token_hex(4)}"
-        while run_id in runs:
-            run_id = f"run_{int(datetime.now().timestamp())}_{secrets.token_hex(4)}"
+    research_runs_repo.create(run_id, project_id, response_id, chat_id, prompt_preview)
+    return run_id
 
-        now = datetime.now().isoformat()
-        runs[run_id] = {
-            "id": run_id,
-            "project": project_name,
-            "response_id": response_id,
-            "chat_id": chat_id,
-            "prompt_preview": prompt_preview,
-            "status": "running",
-            "artifact_id": None,
-            "created_at": now,
-            "completed_at": None,
-            "error": None,
+
+def load_runs(project_name):
+    project_id = projects_repo.get_id(project_name)
+    if project_id is None:
+        return {}
+    return {
+        row["id"]: {
+            "id": row["id"], "project": project_name, "response_id": row["response_id"],
+            "chat_id": row["chat_session_id"], "prompt_preview": row["prompt_preview"],
+            "status": row["status"], "artifact_id": row["artefact_id"],
+            "created_at": row["created_at"], "completed_at": row["completed_at"],
+            "error": row["error"], "updated_at": row["updated_at"],
         }
-        created_run_id[0] = run_id
-
-    update_json(runs_path, updater, default={})
-    return created_run_id[0]
+        for row in research_runs_repo.list_for_project(project_id)
+    }
 
 
 def update_run(project_name, run_id, **fields):
-    runs_path = _runs_path(project_name)
-    if runs_path is None:
+    if _run_for_project(project_name, run_id) is None:
         return False
-
-    found = [False]
-
-    def updater(runs):
-        if run_id not in runs:
-            return
-        runs[run_id].update(fields)
-        runs[run_id]["updated_at"] = datetime.now().isoformat()
-        found[0] = True
-
-    update_json(runs_path, updater, default={})
-    return found[0]
+    column_map = {"chat_id": "chat_session_id", "artifact_id": "artefact_id"}
+    mapped = {column_map.get(k, k): v for k, v in fields.items()}
+    return research_runs_repo.update(run_id, **mapped)
 
 
 def complete_run(project_name, run_id, artifact_id=None):
     return update_run(
-        project_name,
-        run_id,
-        status="completed",
-        artifact_id=artifact_id,
+        project_name, run_id, status="completed", artifact_id=artifact_id,
         completed_at=datetime.now().isoformat(),
     )
 
 
 def fail_run(project_name, run_id, error_message):
     return update_run(
-        project_name,
-        run_id,
-        status="failed",
-        error=error_message,
+        project_name, run_id, status="failed", error=error_message,
         completed_at=datetime.now().isoformat(),
     )
 
 
 def cancel_run(project_name, run_id):
-    return update_run(
-        project_name,
-        run_id,
-        status="cancelled",
-        completed_at=datetime.now().isoformat(),
-    )
+    return update_run(project_name, run_id, status="cancelled", completed_at=datetime.now().isoformat())
 
 
 def is_duplicate_run(project_name, prompt_text, debounce_seconds=30):
@@ -108,20 +83,9 @@ def is_duplicate_run(project_name, prompt_text, debounce_seconds=30):
     Prevents accidental double-clicks while allowing intentional parallel
     runs with different prompts from different tabs.
     """
-    runs = load_runs(project_name)
-    cutoff = datetime.now() - timedelta(seconds=debounce_seconds)
-    # Normalize to the same preview format used by create_run
+    project_id = projects_repo.get_id(project_name)
+    if project_id is None:
+        return False
     preview = (prompt_text[:200] + "...") if len(prompt_text) > 200 else prompt_text
-
-    for r in runs.values():
-        if r.get("status") not in ("queued", "running"):
-            continue
-        created = r.get("created_at", "")
-        try:
-            if datetime.fromisoformat(created) < cutoff:
-                continue  # older than debounce window
-        except (ValueError, TypeError):
-            pass
-        if r.get("prompt_preview") == preview:
-            return True
-    return False
+    cutoff = (datetime.now() - timedelta(seconds=debounce_seconds)).isoformat()
+    return research_runs_repo.find_recent_running_or_queued_with_preview(project_id, preview, cutoff) is not None

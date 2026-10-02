@@ -364,152 +364,116 @@ class TestC2_ArtifactSaveRace:
 
 class TestH1_DeepResearchGuard:
 
-    def test_duplicate_prompt_blocked(self, project):
+    def test_duplicate_prompt_blocked(self, project, temp_db):
         """Same prompt submitted twice within debounce window is rejected."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_abc": {
-                "id": "run_abc",
-                "status": "running",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_abc", project_id, None, None, "Analyse competitor landscape", status="running"
+        )
 
         assert is_duplicate_run(project[0], "Analyse competitor landscape") is True
 
-    def test_different_prompt_allowed(self, project):
+    def test_different_prompt_allowed(self, project, temp_db):
         """A different prompt is allowed even while another run is active."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_abc": {
-                "id": "run_abc",
-                "status": "running",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_abc", project_id, None, None, "Analyse competitor landscape", status="running"
+        )
 
         assert is_duplicate_run(project[0], "Student demand analysis") is False
 
-    def test_no_runs_not_duplicate(self, project):
+    def test_no_runs_not_duplicate(self, project, temp_db):
         """No runs exist — any prompt is allowed."""
+        from db.repositories import projects_repo
         from services.research_run_service import is_duplicate_run
 
+        projects_repo.get_or_create_id(project[0])
         assert is_duplicate_run(project[0], "Any prompt") is False
 
-    def test_completed_run_same_prompt_allowed(self, project):
+    def test_completed_run_same_prompt_allowed(self, project, temp_db):
         """A completed run with the same prompt does not block a re-run."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_done": {
-                "id": "run_done",
-                "status": "completed",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_done", project_id, None, None, "Analyse competitor landscape", status="completed"
+        )
 
         assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
 
-    def test_old_run_same_prompt_allowed(self, project):
+    def test_old_run_same_prompt_allowed(self, project, temp_db):
         """A run outside the debounce window with the same prompt is allowed (re-run)."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_old", project_id, None, None, "Analyse competitor landscape", status="running"
+        )
         old_time = (datetime.now() - timedelta(seconds=60)).isoformat()
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_old": {
-                "id": "run_old",
-                "status": "running",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": old_time,
-            }
-        })
+        research_runs_repo.update("run_old", created_at=old_time)
 
         assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
 
-    def test_queued_duplicate_blocked(self, project):
+    def test_queued_duplicate_blocked(self, project, temp_db):
         """A queued run with the same prompt also counts as a duplicate."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_q": {
-                "id": "run_q",
-                "status": "queued",
-                "prompt_preview": "Market sizing",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create("run_q", project_id, None, None, "Market sizing", status="queued")
 
         assert is_duplicate_run(project[0], "Market sizing") is True
 
-    def test_cancelled_run_does_not_block(self, project):
+    def test_cancelled_run_does_not_block(self, project, temp_db):
         """A cancelled run with the same prompt does not block."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_c": {
-                "id": "run_c",
-                "status": "cancelled",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_c", project_id, None, None, "Analyse competitor landscape", status="cancelled"
+        )
 
         assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
 
-    def test_failed_run_does_not_block(self, project):
+    def test_failed_run_does_not_block(self, project, temp_db):
         """A failed run with the same prompt does not block a retry."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_f": {
-                "id": "run_f",
-                "status": "failed",
-                "prompt_preview": "Analyse competitor landscape",
-                "created_at": datetime.now().isoformat(),
-            }
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create(
+            "run_f", project_id, None, None, "Analyse competitor landscape", status="failed"
+        )
 
         assert is_duplicate_run(project[0], "Analyse competitor landscape") is False
 
-    def test_parallel_different_prompts_both_allowed(self, project):
+    def test_parallel_different_prompts_both_allowed(self, project, temp_db):
         """Two active runs with different prompts — a third different prompt is allowed."""
+        from db.repositories import projects_repo, research_runs_repo
         from services.research_run_service import is_duplicate_run
 
-        runs_file = project[1] / "research_runs.json"
-        write_json(runs_file, {
-            "run_1": {
-                "id": "run_1",
-                "status": "running",
-                "prompt_preview": "Competitor analysis",
-                "created_at": datetime.now().isoformat(),
-            },
-            "run_2": {
-                "id": "run_2",
-                "status": "running",
-                "prompt_preview": "Student demand",
-                "created_at": datetime.now().isoformat(),
-            },
-        })
+        project_id = projects_repo.get_or_create_id(project[0])
+        research_runs_repo.create("run_1", project_id, None, None, "Competitor analysis", status="running")
+        research_runs_repo.create("run_2", project_id, None, None, "Student demand", status="running")
 
         assert is_duplicate_run(project[0], "Marketing channels") is False
         assert is_duplicate_run(project[0], "Competitor analysis") is True
 
-    def test_concurrent_run_creation_persists_all_runs(self, project):
-        """Concurrent create_run calls must not overwrite each other on disk."""
+    def test_concurrent_run_creation_persists_all_runs(self, project, temp_db):
+        """Concurrent create_run calls must not overwrite each other in the database."""
+        from db.repositories import projects_repo
         from services.research_run_service import create_run, load_runs
 
+        projects_repo.get_or_create_id(project[0])
         created_ids = []
         lock = threading.Lock()
 
