@@ -44,3 +44,9 @@ htmlcov/
 
 # Project data (user uploads and generated content)
 projects/
+
+# Local SQLite database
+instance/
+
+# Git worktrees for subagent-driven plan execution
+.worktrees/
