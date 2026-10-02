@@ -42,17 +42,23 @@ def delete_session(id):
 def append_message(chat_session_id, role, content, artefact_id=None):
     now = datetime.now().isoformat()
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM project_messages WHERE chat_session_id = ?",
-            (chat_session_id,),
-        ).fetchone()
-        next_seq = row["max_seq"] + 1
-        conn.execute(
-            "INSERT INTO project_messages (chat_session_id, seq, role, content, artefact_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_session_id, next_seq, role, content, artefact_id, now),
-        )
-        return next_seq
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM project_messages WHERE chat_session_id = ?",
+                (chat_session_id,),
+            ).fetchone()
+            next_seq = row["max_seq"] + 1
+            conn.execute(
+                "INSERT INTO project_messages (chat_session_id, seq, role, content, artefact_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_session_id, next_seq, role, content, artefact_id, now),
+            )
+            conn.execute("COMMIT")
+            return next_seq
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def list_messages(chat_session_id):
