@@ -76,11 +76,24 @@ def test_get_finding_for_task_in_version_is_scoped_correctly(temp_db):
 def test_unlink_evidence_by_source_in_version(temp_db):
     pid = projects_repo.get_or_create_id("P")
     tid = research_tasks_repo.get_or_create_task(pid, "1", "The Landscape")
-    vid = research_tasks_repo.create_version(pid, 1, "2026-01-01T00:00:00", "[]", "")
-    fid = research_tasks_repo.create_finding(tid, vid, "Summary", None, "medium")
     sid = sources_repo.upsert(pid, "f_1", "report.pdf")
-    eid = research_tasks_repo.create_evidence(pid, None, source_id=sid)
-    research_tasks_repo.link_finding_evidence(fid, eid)
 
-    research_tasks_repo.unlink_evidence_by_source_in_version(vid, sid)
-    assert research_tasks_repo.list_evidence_for_finding(fid) == []
+    # Version 1: finding + evidence linked to the source we're about to unlink.
+    vid1 = research_tasks_repo.create_version(pid, 1, "2026-01-01T00:00:00", "[]", "")
+    fid1 = research_tasks_repo.create_finding(tid, vid1, "Summary", None, "medium")
+    eid1 = research_tasks_repo.create_evidence(pid, None, source_id=sid)
+    research_tasks_repo.link_finding_evidence(fid1, eid1)
+
+    # Version 2: a separate finding for the same task, with its own evidence
+    # row pointing at the SAME source, linked in this other version.
+    vid2 = research_tasks_repo.create_version(pid, 2, "2026-01-02T00:00:00", "[]", "")
+    fid2 = research_tasks_repo.create_finding(tid, vid2, "Summary v2", None, "medium")
+    eid2 = research_tasks_repo.create_evidence(pid, None, source_id=sid)
+    research_tasks_repo.link_finding_evidence(fid2, eid2)
+
+    research_tasks_repo.unlink_evidence_by_source_in_version(vid1, sid)
+
+    # Version 1's link to the source is gone...
+    assert research_tasks_repo.list_evidence_for_finding(fid1) == []
+    # ...but version 2's link to the same source is untouched.
+    assert len(research_tasks_repo.list_evidence_for_finding(fid2)) == 1
