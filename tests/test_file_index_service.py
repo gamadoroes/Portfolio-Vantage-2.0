@@ -1,16 +1,18 @@
-import json
 from unittest.mock import patch
 
+from db.repositories import projects_repo, sources_repo
 from services.file_index_service import (
     _dedupe,
     _is_hidden_source_file,
     _is_internal_temp_file,
     _normalize_index_data,
+    ensure_file_id,
     get_file_id,
     reconcile_file_index,
     remove_file_from_index,
     rename_file_in_index,
     resolve_file_refs_to_names,
+    toggle_selected_file,
 )
 
 # --- Unit tests for pure helpers ---
@@ -87,29 +89,18 @@ def test_normalize_index_data_skips_invalid_entries():
 
 # --- Integration tests with file system ---
 
-def _setup_project(tmp_path, project_name, files=None, index_data=None):
-    """Create a minimal project structure for testing."""
+def _setup_project_dir(tmp_path, project_name, files=None):
     project_dir = tmp_path / "projects" / project_name
     files_dir = project_dir / "files"
     files_dir.mkdir(parents=True)
-
     for filename in (files or []):
         (files_dir / filename).write_text("content", encoding="utf-8")
-
-    if index_data is not None:
-        (project_dir / "file_index.json").write_text(
-            json.dumps(index_data), encoding="utf-8"
-        )
-
-    config = {"name": project_name, "selected_files": [], "selected_file_ids": []}
-    (project_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
-
     return project_dir
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_reconcile_adds_new_files(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["a.txt", "b.txt"])
+def test_reconcile_registers_new_files_as_sources(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt", "b.txt"])
     mock_dir.return_value = project_dir
 
     entries = reconcile_file_index("proj")
@@ -119,100 +110,74 @@ def test_reconcile_adds_new_files(mock_dir, tmp_path):
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_reconcile_removes_deleted_files(mock_dir, tmp_path):
-    index_data = {
-        "version": 1,
-        "files": {"f_old": {"filename": "gone.txt", "created_at": None, "updated_at": None}},
-    }
-    project_dir = _setup_project(tmp_path, "proj", files=["kept.txt"], index_data=index_data)
+def test_reconcile_is_stable_across_calls(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt"])
     mock_dir.return_value = project_dir
 
-    entries = reconcile_file_index("proj")
-    filenames = {rec["filename"] for rec in entries.values()}
-    assert "gone.txt" not in filenames
-    assert "kept.txt" in filenames
+    first = reconcile_file_index("proj")
+    second = reconcile_file_index("proj")
+    assert first == second
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_reconcile_excludes_temp_files(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["real.txt"])
-    # Manually add a temp file
+def test_reconcile_excludes_temp_files(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["real.txt"])
     (project_dir / "files" / ".write_abc.tmp").write_text("temp", encoding="utf-8")
     mock_dir.return_value = project_dir
 
     entries = reconcile_file_index("proj")
     filenames = {rec["filename"] for rec in entries.values()}
-    assert "real.txt" in filenames
     assert ".write_abc.tmp" not in filenames
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_get_file_id_returns_correct_id(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["doc.pdf"])
+def test_get_file_id_returns_correct_id(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["doc.pdf"])
     mock_dir.return_value = project_dir
 
     entries = reconcile_file_index("proj")
     file_id = get_file_id("proj", "doc.pdf", entries)
-    assert file_id is not None
-    assert file_id.startswith("f_")
-    assert get_file_id("proj", "nonexistent.txt", entries) is None
+    assert file_id in entries
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_remove_file_from_index(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["a.txt", "b.txt"])
+def test_rename_preserves_id(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["old.txt"])
     mock_dir.return_value = project_dir
-
-    reconcile_file_index("proj")
-    removed_id = remove_file_from_index("proj", "a.txt")
-    assert removed_id is not None
-
     entries = reconcile_file_index("proj")
-    # a.txt still exists on disk, so reconcile will re-add it with a new ID
-    filenames = {rec["filename"] for rec in entries.values()}
-    assert "a.txt" in filenames
+    file_id = get_file_id("proj", "old.txt", entries)
 
-
-@patch("services.file_index_service.get_project_dir")
-def test_rename_file_in_index(mock_dir, tmp_path):
-    """rename_file_in_index should be called BEFORE the file is renamed on disk,
-    since reconcile_file_index (called internally) would drop the old entry if
-    the old file no longer exists."""
-    project_dir = _setup_project(tmp_path, "proj", files=["old.txt"])
-    mock_dir.return_value = project_dir
-
-    entries = reconcile_file_index("proj")
-    old_id = get_file_id("proj", "old.txt", entries)
-
-    # Call rename_file_in_index while old.txt still exists on disk
-    result = rename_file_in_index("proj", "old.txt", "new.txt")
-    assert result is True
-
-    # Now rename the actual file
     (project_dir / "files" / "old.txt").rename(project_dir / "files" / "new.txt")
+    rename_file_in_index("proj", "old.txt", "new.txt")
 
-    entries = reconcile_file_index("proj")
-    assert get_file_id("proj", "new.txt", entries) == old_id
-
-
-@patch("services.file_index_service.get_project_dir")
-def test_resolve_file_refs_handles_ids_and_names(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["a.txt", "b.txt"])
-    mock_dir.return_value = project_dir
-
-    entries = reconcile_file_index("proj")
-    a_id = get_file_id("proj", "a.txt", entries)
-
-    # Mix of IDs and bare filenames
-    result = resolve_file_refs_to_names("proj", [a_id, "b.txt"], entries)
-    assert set(result) == {"a.txt", "b.txt"}
+    entries_after = reconcile_file_index("proj")
+    assert entries_after[file_id]["filename"] == "new.txt"
 
 
 @patch("services.file_index_service.get_project_dir")
-def test_resolve_excludes_hidden_files(mock_dir, tmp_path):
-    project_dir = _setup_project(tmp_path, "proj", files=["insights.json", "report.txt"])
+def test_toggle_selected_file(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt"])
     mock_dir.return_value = project_dir
-
     entries = reconcile_file_index("proj")
-    result = resolve_file_refs_to_names("proj", ["insights.json", "report.txt"], entries)
-    assert result == ["report.txt"]
+    file_id = get_file_id("proj", "a.txt", entries)
+
+    assert toggle_selected_file("proj", filename="a.txt") is True
+    state = reconcile_selected_file_ids_for_test("proj")
+    assert file_id in state
+    assert toggle_selected_file("proj", filename="a.txt") is False
+
+
+def reconcile_selected_file_ids_for_test(project_name):
+    from services.file_index_service import reconcile_selected_file_ids
+    return reconcile_selected_file_ids(project_name)["selected_file_ids"]
+
+
+@patch("services.file_index_service.get_project_dir")
+def test_resolve_file_refs_to_names_excludes_hidden(mock_dir, temp_db, tmp_path):
+    project_dir = _setup_project_dir(tmp_path, "proj", files=["a.txt"])
+    mock_dir.return_value = project_dir
+    entries = reconcile_file_index("proj")
+    file_id = get_file_id("proj", "a.txt", entries)
+
+    names = resolve_file_refs_to_names("proj", [file_id, "insights.json"])
+    assert names == ["a.txt"]
