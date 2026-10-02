@@ -1,82 +1,81 @@
 import secrets
 from datetime import datetime
 
-from .project_service import get_project_path
-from .storage import read_json, update_json, write_json
+from db.repositories import chat_repo, projects_repo
 
 
-def _chats_path(project_name):
-    return get_project_path(project_name, "chat_history.json")
+def _session_to_dict(session_row, messages):
+    return {
+        "name": session_row["name"],
+        "created": session_row["created_at"],
+        "messages": [
+            {"role": m["role"], "content": m["content"], "artifact_id": m["artefact_id"]}
+            for m in messages
+        ],
+    }
 
 
 def load_chat_sessions(project_name):
-    chats_path = _chats_path(project_name)
-    if chats_path is None:
+    project_id = projects_repo.get_id(project_name)
+    if project_id is None:
         return {}
-    return read_json(chats_path, {})
+    sessions = {}
+    for session_row in chat_repo.list_sessions_for_project(project_id):
+        messages = chat_repo.list_messages(session_row["id"])
+        sessions[session_row["id"]] = _session_to_dict(session_row, messages)
+    return sessions
 
 
 def load_chat_sessions_locked(project_name):
-    """Read chat sessions while holding the file lock.
-
-    Use this when the caller needs a consistent snapshot that won't be stale
-    due to a concurrent ``update_json`` write (e.g. when building LLM context
-    while another request is appending messages).
-    """
-    if not project_name:
-        return {}
-    from .storage import _get_lock, _read_json_reliable
-    chats_file = _chats_path(project_name)
-    if chats_file is None:
-        return {}
-    lock = _get_lock(chats_file)
-    with lock:
-        return _read_json_reliable(chats_file, {})
+    """SQLite transactions already give a consistent read; kept for call-site compatibility."""
+    return load_chat_sessions(project_name)
 
 
 def save_chat_sessions(project_name, sessions):
-    chats_file = _chats_path(project_name)
-    if chats_file is None:
-        raise ValueError("Invalid project name.")
-    write_json(chats_file, sessions)
+    # No longer used for bulk writes now that each mutation (create/append) writes
+    # directly through chat_repo; kept only so any lingering caller doesn't crash.
+    pass
 
 
 def create_new_chat(project_name):
-    """Atomically create a new chat session and return its ID."""
-    chats_file = _chats_path(project_name)
-    if chats_file is None:
-        return None
-    new_id = [None]
-
-    def updater(sessions):
+    project_id = projects_repo.get_or_create_id(project_name)
+    chat_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
+    while chat_repo.get_session(chat_id) is not None:
         chat_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
-        while chat_id in sessions:
-            chat_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
-        sessions[chat_id] = {
-            "name": f"Research {datetime.now().strftime('%b %d, %H:%M:%S')}",
-            "messages": [],
-            "created": datetime.now().isoformat(),
-        }
-        new_id[0] = chat_id
-
-    update_json(chats_file, updater, default={})
-    return new_id[0]
+    chat_repo.create_session(chat_id, project_id, f"Research {datetime.now().strftime('%b %d, %H:%M:%S')}")
+    return chat_id
 
 
 def append_message_to_chat(project_name, chat_id, message):
-    """Atomically append a single message to a chat session.
-
-    Returns True if the message was appended, False if the chat was not found.
-    """
-    chats_file = _chats_path(project_name)
-    if chats_file is None:
+    if chat_repo.get_session(chat_id) is None:
         return False
-    found = [False]
+    chat_repo.append_message(
+        chat_id, message.get("role", "user"), message.get("content", ""),
+        artefact_id=message.get("artifact_id"),
+    )
+    return True
 
-    def updater(sessions):
-        if chat_id in sessions:
-            sessions[chat_id]["messages"].append(message)
-            found[0] = True
 
-    update_json(chats_file, updater, default={})
-    return found[0]
+def delete_chat(project_name, chat_id):
+    if chat_repo.get_session(chat_id) is None:
+        return False
+    chat_repo.delete_session(chat_id)
+    return True
+
+
+def rename_chat(project_name, chat_id, new_name):
+    if chat_repo.get_session(chat_id) is None:
+        return False
+    chat_repo.rename_session(chat_id, new_name)
+    return True
+
+
+def link_artifact_to_message_by_index(project_name, chat_id, index, artifact_id):
+    if chat_repo.get_session(chat_id) is None:
+        return "not_found"
+    seq = index + 1
+    messages = chat_repo.list_messages(chat_id)
+    if index < 0 or index >= len(messages):
+        return "out_of_range"
+    chat_repo.link_artefact_to_message(chat_id, seq, artifact_id)
+    return "ok"

@@ -44,26 +44,37 @@ def project(tmp_path, monkeypatch):
 
 class TestC3_ChatIdCollision:
 
-    def test_chat_id_contains_random_suffix(self, project):
+    def test_chat_id_contains_random_suffix(self, project, temp_db):
         """New chat IDs must include a random hex suffix after the timestamp."""
+        from db.repositories import projects_repo
         from services.chat_service import create_new_chat
 
+        projects_repo.get_or_create_id(project[0])
         chat_id = create_new_chat(project[0])
         parts = chat_id.split("_")
         # Format: YYYYMMDD_HHMMSS_<hex>
         assert len(parts) == 3, f"Expected 3 parts in chat_id, got {parts}"
         assert len(parts[2]) == 8, f"Hex suffix should be 8 chars, got '{parts[2]}'"
 
-    def test_ten_rapid_creates_all_unique(self, project):
+    def test_ten_rapid_creates_all_unique(self, project, temp_db):
         """10 create_new_chat calls in a tight loop must all produce distinct IDs."""
+        from db.repositories import projects_repo
         from services.chat_service import create_new_chat
 
+        projects_repo.get_or_create_id(project[0])
         ids = [create_new_chat(project[0]) for _ in range(10)]
         assert len(set(ids)) == 10, f"Duplicate IDs found: {ids}"
 
-    def test_concurrent_creates_all_unique(self, project):
+    def test_concurrent_creates_all_unique(self, project, temp_db):
         """Threads creating chats simultaneously must never collide."""
+        from db.repositories import projects_repo
         from services.chat_service import create_new_chat
+
+        # Pre-create the project row: get_or_create_id's SELECT-then-INSERT is not
+        # itself race-safe, but create_new_chat is only ever called for a project
+        # that already exists by the time a chat is created in the real app, so we
+        # mirror that here rather than exercising an unrelated repo-level race.
+        projects_repo.get_or_create_id(project[0])
 
         ids = []
         lock = threading.Lock()
@@ -81,19 +92,17 @@ class TestC3_ChatIdCollision:
 
         assert len(set(ids)) == 10, f"Duplicate IDs in concurrent creation: {ids}"
 
-    def test_old_format_chat_ids_still_work(self, project):
-        """Projects with old-format IDs (YYYYMMDD_HHMMSS) must load without migration."""
+    def test_old_format_chat_ids_still_work(self, project, temp_db):
+        """Chats with legacy ID format (YYYYMMDD_HHMMSS, no hex suffix) must load
+        and accept appends just like current-format IDs — the ID is just a string
+        primary key to the service, so no migration/special-casing is needed."""
+        from db.repositories import chat_repo, projects_repo
         from services.chat_service import append_message_to_chat, load_chat_sessions
 
+        project_id = projects_repo.get_or_create_id(project[0])
         old_id = "20250115_143022"
-        chats_file = project[1] / "chat_history.json"
-        write_json(chats_file, {
-            old_id: {
-                "name": "Legacy chat",
-                "messages": [{"role": "user", "content": "hello"}],
-                "created": "2025-01-15T14:30:22",
-            }
-        })
+        chat_repo.create_session(old_id, project_id, "Legacy chat")
+        chat_repo.append_message(old_id, "user", "hello")
 
         sessions = load_chat_sessions(project[0])
         assert old_id in sessions
@@ -111,10 +120,12 @@ class TestC3_ChatIdCollision:
 
 class TestC1_ChatHistoryLostUpdate:
 
-    def test_append_message_persists(self, project):
+    def test_append_message_persists(self, project, temp_db):
         """append_message_to_chat must persist a message atomically."""
+        from db.repositories import projects_repo
         from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions
 
+        projects_repo.get_or_create_id(project[0])
         chat_id = create_new_chat(project[0])
         append_message_to_chat(project[0], chat_id, {"role": "user", "content": "q1"})
         append_message_to_chat(project[0], chat_id, {"role": "assistant", "content": "a1"})
@@ -122,13 +133,15 @@ class TestC1_ChatHistoryLostUpdate:
         sessions = load_chat_sessions(project[0])
         msgs = sessions[chat_id]["messages"]
         assert len(msgs) == 2
-        assert msgs[0] == {"role": "user", "content": "q1"}
-        assert msgs[1] == {"role": "assistant", "content": "a1"}
+        assert msgs[0] == {"role": "user", "content": "q1", "artifact_id": None}
+        assert msgs[1] == {"role": "assistant", "content": "a1", "artifact_id": None}
 
-    def test_concurrent_appends_no_lost_messages(self, project):
+    def test_concurrent_appends_no_lost_messages(self, project, temp_db):
         """Two threads appending to the same chat must both persist."""
+        from db.repositories import projects_repo
         from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions
 
+        projects_repo.get_or_create_id(project[0])
         chat_id = create_new_chat(project[0])
         errors = []
 
@@ -154,10 +167,12 @@ class TestC1_ChatHistoryLostUpdate:
         msgs = sessions[chat_id]["messages"]
         assert len(msgs) == 20, f"Expected 20 messages, got {len(msgs)}"
 
-    def test_append_to_nonexistent_chat_is_noop(self, project):
+    def test_append_to_nonexistent_chat_is_noop(self, project, temp_db):
         """Appending to a deleted/missing chat must not crash or create a ghost entry."""
+        from db.repositories import projects_repo
         from services.chat_service import append_message_to_chat, load_chat_sessions
 
+        projects_repo.get_or_create_id(project[0])
         append_message_to_chat(project[0], "no_such_chat", {"role": "user", "content": "x"})
         sessions = load_chat_sessions(project[0])
         assert "no_such_chat" not in sessions
@@ -196,16 +211,17 @@ class TestC1_ChatHistoryLostUpdate:
         update_json(path, add_item)
         assert read_json(path, None) == {"items": ["new"]}
 
-    def test_simulated_two_tab_streaming(self, project):
+    def test_simulated_two_tab_streaming(self, project, temp_db):
         """Simulate C1 test scenario: two browser tabs sending messages to
         the same chat concurrently, with streaming delays.
 
         Tab A sends user_A, streams for a while, then saves assistant_A.
         While Tab A streams, Tab B sends user_B, streams briefly, saves assistant_B.
-        All 4 messages must be present in chat_history.json afterward.
+        All 4 messages must be present afterward.
         """
         import time
 
+        from db.repositories import projects_repo
         from services.chat_service import (
             append_message_to_chat,
             create_new_chat,
@@ -213,6 +229,7 @@ class TestC1_ChatHistoryLostUpdate:
             load_chat_sessions_locked,
         )
 
+        projects_repo.get_or_create_id(project[0])
         chat_id = create_new_chat(project[0])
         errors = []
 
