@@ -146,3 +146,53 @@ def test_migrates_excluded_competitors_and_selected_files(temp_db, tmp_path):
     assert set(excluded_competitors_repo.list_for_project(pid)) == {"Competitor X"}
     source = sources_repo.get_by_stable_id(pid, "f_abc")
     assert sources_repo.list_selected_ids(pid) == [source["id"]]
+
+
+def test_migrates_research_run_with_dangling_chat_id_without_crashing(temp_db, tmp_path):
+    # Reproduces real production data drift: a research run references a
+    # chat_id that no longer exists in chat_history.json (the chat session
+    # was deleted via the UI at some point, but the old JSON storage never
+    # enforced referential integrity between the two files). The new
+    # research_runs.chat_session_id FK must not crash the whole migration
+    # over this -- it should migrate the run with chat_session_id = None.
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Dangling Chat Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "outputs").mkdir()
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Dangling Chat Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    # chat_history.json has zero sessions -- the referenced chat_id is absent
+    (project_dir / "chat_history.json").write_text("{}", encoding="utf-8")
+    (project_dir / "research_runs.json").write_text(
+        json.dumps({
+            "run_1_dangling": {
+                "response_id": "resp_123",
+                "chat_id": "chat_does_not_exist",
+                "prompt_preview": "some prompt",
+                "status": "completed",
+                "artifact_id": None,
+                "error": None,
+                "completed_at": "2026-01-01T00:00:00",
+            }
+        }),
+        encoding="utf-8",
+    )
+    (project_dir / "file_index.json").write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+
+    report = migrate_all_projects(str(projects_root))  # must not raise FOREIGN KEY constraint failed
+
+    pid = projects_repo.get_id("Dangling Chat Project")
+    assert pid is not None
+    migrated_run = research_runs_repo.get("run_1_dangling")
+    assert migrated_run is not None
+    assert migrated_run["chat_session_id"] is None
+    assert migrated_run["response_id"] == "resp_123"
+    assert migrated_run["status"] == "completed"
+    assert report["Dangling Chat Project"]["research_runs"] == 1

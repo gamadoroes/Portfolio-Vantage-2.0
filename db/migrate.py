@@ -75,11 +75,20 @@ def _migrate_project_core(project_dir, project_name):
     for run_id, run in research_runs.items():
         if research_runs_repo.get(run_id) is not None:
             continue
+        chat_id = run.get("chat_id")
+        if chat_id is not None and chat_repo.get_session(chat_id) is None:
+            # Pre-existing data drift: the old JSON storage never enforced
+            # referential integrity between research_runs.json and
+            # chat_history.json, so this backlink can point at a chat
+            # session that no longer exists (e.g. deleted via the UI).
+            # Preserve the run but drop the dangling backlink rather than
+            # letting the chat_session_id FK crash the whole migration.
+            chat_id = None
         research_runs_repo.create(
             run_id,
             project_id,
             run.get("response_id"),
-            run.get("chat_id"),
+            chat_id,
             run.get("prompt_preview", ""),
             status=run.get("status", "completed"),
         )
