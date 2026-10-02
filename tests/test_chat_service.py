@@ -71,3 +71,52 @@ def test_link_artifact_to_message_out_of_range(temp_db):
 def test_link_artifact_to_message_chat_not_found(temp_db):
     projects_repo.get_or_create_id("P")
     assert chat_service.link_artifact_to_message_by_index("P", "nope", 0, "art_1") == "not_found"
+
+
+def test_append_message_to_chat_from_wrong_project_returns_false(temp_db):
+    projects_repo.get_or_create_id("P")
+    projects_repo.get_or_create_id("Q")
+    chat_id = chat_service.create_new_chat("P")
+    assert chat_service.append_message_to_chat("Q", chat_id, {"role": "user", "content": "hi"}) is False
+    assert chat_service.load_chat_sessions("P")[chat_id]["messages"] == []
+
+
+def test_delete_chat_from_wrong_project_returns_false(temp_db):
+    projects_repo.get_or_create_id("P")
+    projects_repo.get_or_create_id("Q")
+    chat_id = chat_service.create_new_chat("P")
+    assert chat_service.delete_chat("Q", chat_id) is False
+    assert chat_id in chat_service.load_chat_sessions("P")
+
+
+def test_rename_chat_from_wrong_project_returns_false(temp_db):
+    projects_repo.get_or_create_id("P")
+    projects_repo.get_or_create_id("Q")
+    chat_id = chat_service.create_new_chat("P")
+    assert chat_service.rename_chat("Q", chat_id, "Hacked") is False
+    assert chat_service.load_chat_sessions("P")[chat_id]["name"] != "Hacked"
+
+
+def test_link_artifact_to_message_from_wrong_project_returns_not_found(temp_db):
+    from db.repositories import artefacts_repo
+    projects_repo.get_or_create_id("P")
+    projects_repo.get_or_create_id("Q")
+    artefacts_repo.upsert("art_1", projects_repo.get_id("P"), "Artefact")
+    chat_id = chat_service.create_new_chat("P")
+    chat_service.append_message_to_chat("P", chat_id, {"role": "user", "content": "hi"})
+    assert chat_service.link_artifact_to_message_by_index("Q", chat_id, 0, "art_1") == "not_found"
+
+
+def test_append_message_to_chat_unknown_project_returns_false(temp_db):
+    projects_repo.get_or_create_id("P")
+    chat_id = chat_service.create_new_chat("P")
+    assert chat_service.append_message_to_chat("NoSuchProject", chat_id, {"role": "user", "content": "hi"}) is False
+
+
+def test_create_new_chat_rejects_invalid_project_name():
+    import pytest
+
+    with pytest.raises(ValueError):
+        chat_service.create_new_chat(None)
+    with pytest.raises(ValueError):
+        chat_service.create_new_chat("../evil")
