@@ -3980,7 +3980,7 @@ Expected: prints a per-project row-count report; exits 0; `projects/*/*.json` fi
 python app.py
 ```
 
-Open each of the 7 real projects in the browser (per `docs/ARCHITECTURE.md` §5, these are: "Bach Food and Nutrition for Fed", "GillianTest", "International Student MBAs", "M Proj Mgmt", "Mast Public Health - 042926", "MOL - Grad Dip Psych - 040926", "MOL - MBA - 042926"). For each: confirm the artefact list matches what it showed before migration, confirm research run history/status matches, confirm chat history is intact. This directly exercises the stated acceptance criteria ("existing projects can be opened after migration and contain the same artefacts, research runs and phase associations").
+Open each of the 7 real projects in the browser (per `docs/ARCHITECTURE - Pre-Rebuild.md` §5, these are: "Bach Food and Nutrition for Fed", "GillianTest", "International Student MBAs", "M Proj Mgmt", "Mast Public Health - 042926", "MOL - Grad Dip Psych - 040926", "MOL - MBA - 042926"). For each: confirm the artefact list matches what it showed before migration, confirm research run history/status matches, confirm chat history is intact. This directly exercises the stated acceptance criteria ("existing projects can be opened after migration and contain the same artefacts, research runs and phase associations").
 
 - [ ] **Step 4: Remove the manual backup once verified**
 
