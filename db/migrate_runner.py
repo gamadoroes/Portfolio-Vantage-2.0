@@ -34,8 +34,20 @@ def apply_migrations():
             version = path.stem
             if version in applied:
                 continue
-            conn.executescript(path.read_text(encoding="utf-8"))
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, datetime.now().isoformat()),
-            )
+            try:
+                conn.execute("BEGIN")
+                # Execute SQL statements from migration file
+                sql_content = path.read_text(encoding="utf-8")
+                for statement in sql_content.split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        conn.execute(statement)
+                # Record successful migration
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                    (version, datetime.now().isoformat()),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
