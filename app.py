@@ -15,8 +15,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    from db.connection import set_database_path
-    set_database_path(app.config["DATABASE_PATH"])
+    from db.connection import has_database_path_override, set_database_path
+    # Tests pre-pin the DB path via set_database_path() before calling
+    # create_app(); don't clobber that override back to the production default.
+    if not has_database_path_override():
+        set_database_path(app.config["DATABASE_PATH"])
 
     app.register_blueprint(main_bp)
     app.register_blueprint(projects_bp)

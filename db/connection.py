@@ -19,6 +19,11 @@ def get_database_path():
     return Path(os.environ.get("DATABASE_PATH", _DEFAULT_DB_PATH))
 
 
+def has_database_path_override():
+    """True if set_database_path() has already pinned an explicit path (tests)."""
+    return _db_path_override is not None
+
+
 @contextmanager
 def get_connection():
     db_path = get_database_path()

@@ -4,6 +4,11 @@ from services.artifact_service import load_artifacts
 from services.research_run_service import load_runs
 from services.chat_service import load_chat_sessions
 from services.file_service import load_project_files
+from services.insights_service import (
+    load_current_insights,
+    load_excluded_competitors,
+    load_insights_history,
+)
 from services.reference_integrity_service import reconcile_project_references
 from services.file_index_service import (
     reconcile_file_index,
@@ -84,7 +89,11 @@ def get_project(project_name):
     index_entries = reconcile_file_index(project_name)
     selection_state = reconcile_selected_file_ids(project_name, index_entries)
 
+    import json
     files = load_project_files(project_name)
+    files["insights.json"] = json.dumps(load_current_insights(project_name))
+    files["insights_history.json"] = json.dumps(load_insights_history(project_name))
+    files["excluded_competitors.json"] = json.dumps(load_excluded_competitors(project_name))
     chats = load_chat_sessions(project_name)
     artifacts = load_artifacts(project_name)
     research_runs = load_runs(project_name)

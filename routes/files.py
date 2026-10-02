@@ -13,6 +13,10 @@ from services.file_service import (
     rename_project_file,
     save_project_file,
 )
+from services.insights_service import (
+    save_excluded_competitors,
+    save_insights,
+)
 from services.project_service import normalize_project_name, project_exists
 from services.reference_integrity_service import (
     remove_file_references,
@@ -63,8 +67,23 @@ def save_file():
 
     if data is not None:
         filename = data.get("filename")
+        content = data.get("content")
+
+        if filename == "insights.json":
+            import json
+            save_insights(project, json.loads(content))
+            return jsonify({"success": True})
+        if filename == "insights_history.json":
+            # History is derived from saved versions, not written directly;
+            # accept and no-op so any caller still POSTing it doesn't error.
+            return jsonify({"success": True})
+        if filename == "excluded_competitors.json":
+            import json
+            save_excluded_competitors(project, json.loads(content))
+            return jsonify({"success": True})
+
         try:
-            save_project_file(project, filename, data.get("content"))
+            save_project_file(project, filename, content)
         except ValueError as exc:
             return jsonify({"success": False, "error": str(exc)}), 400
         ensure_file_id(project, filename)
