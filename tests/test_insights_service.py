@@ -89,6 +89,25 @@ def test_evidence_sources_with_linked_file_round_trips(temp_db):
     assert current["phases"]["1"]["linked_files"] == ["report.pdf"]
 
 
+def test_historical_version_keeps_linked_file_after_source_deleted(temp_db):
+    # Regression test for I1: deleting a source nulls evidence.source_id
+    # (sources_repo.delete, to avoid an IntegrityError), but historical
+    # insight versions must still show which file backed their evidence.
+    pid = projects_repo.get_or_create_id("P")
+    source_row_id = sources_repo.upsert(pid, "f_abc123", "report.pdf")
+    insights_service.save_insights(
+        "P", _sample_data(summary="Version 1 summary", linked_file_id="f_abc123")
+    )
+    insights_service.save_insights("P", _sample_data(summary="Version 2 summary"))
+
+    sources_repo.delete(source_row_id)
+
+    history = insights_service.load_insights_history("P")
+    v1 = next(h for h in history if h["version"] == 1)
+    assert v1["data"]["phases"]["1"]["linked_files"] == ["report.pdf"]
+    assert v1["data"]["phases"]["1"]["linked_file_ids"] == ["f_abc123"]
+
+
 def test_load_current_insights_for_project_with_no_saves_yet_returns_empty_shape(temp_db):
     loaded = insights_service.load_current_insights("Untouched Project")
     assert loaded["phases"]["1"]["summary"] == "MISSING"

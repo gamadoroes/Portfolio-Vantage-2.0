@@ -49,14 +49,20 @@ def save_insights(project_name, data):
             source_row = sources_repo.get_by_stable_id(project_id, stable_file_id)
             if source_row is None:
                 continue
-            evidence_id = research_tasks_repo.create_evidence(project_id, None, source_id=source_row["id"])
+            evidence_id = research_tasks_repo.create_evidence(
+                project_id,
+                None,
+                source_id=source_row["id"],
+                filename=source_row["filename"],
+                stable_file_id=source_row["stable_file_id"],
+            )
             research_tasks_repo.link_finding_evidence(finding_id, evidence_id)
 
         for topic in phase.get("suggested_topics") or []:
             research_tasks_repo.create_ad_hoc_task(project_id, topic)
 
 
-def _build_phase_data(version_id, phase_key, task_id, project_id):
+def _build_phase_data(version_id, phase_key, task_id):
     # Scoped to (task_id, version_id) — NOT list_findings_for_version() + [0], which
     # would return an arbitrary one of all 7 phases' findings for this version.
     finding = research_tasks_repo.get_finding_for_task_in_version(task_id, version_id)
@@ -75,12 +81,9 @@ def _build_phase_data(version_id, phase_key, task_id, project_id):
     for row in evidence_rows:
         if row["raw_text"]:
             evidence_sources.append(row["raw_text"])
-        if row["source_id"] is not None:
-            sources = sources_repo.list_for_project(project_id)
-            match = next((s for s in sources if s["id"] == row["source_id"]), None)
-            if match is not None:
-                linked_files.append(match["filename"])
-                linked_file_ids.append(match["stable_file_id"])
+        if row["filename"] is not None:
+            linked_files.append(row["filename"])
+            linked_file_ids.append(row["stable_file_id"])
     phase["evidence_sources"] = evidence_sources
     phase["linked_files"] = linked_files
     phase["linked_file_ids"] = linked_file_ids
@@ -107,7 +110,7 @@ def _build_insights_payload(project_id, version_row):
         if task_id is None:
             phases[phase_key] = _empty_phase_payload(phase_key)
         else:
-            phases[phase_key] = _build_phase_data(version_row["id"], phase_key, task_id, project_id)
+            phases[phase_key] = _build_phase_data(version_row["id"], phase_key, task_id)
 
     return {
         "generated_at": version_row["generated_at"],

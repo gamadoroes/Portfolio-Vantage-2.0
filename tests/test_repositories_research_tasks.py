@@ -54,6 +54,34 @@ def test_finding_and_evidence_round_trip(temp_db):
     assert len(evidence) == 2
 
 
+def test_create_evidence_stores_filename_snapshot(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    sid = sources_repo.upsert(pid, "f_1", "report.pdf")
+    eid = research_tasks_repo.create_evidence(
+        pid, None, source_id=sid, filename="report.pdf", stable_file_id="f_1"
+    )
+
+    fid = research_tasks_repo.create_finding(
+        research_tasks_repo.get_or_create_task(pid, "1", "The Landscape"),
+        research_tasks_repo.create_version(pid, 1, "2026-01-01T00:00:00", "[]", ""),
+        "Summary",
+        None,
+        "medium",
+    )
+    research_tasks_repo.link_finding_evidence(fid, eid)
+
+    evidence = research_tasks_repo.list_evidence_for_finding(fid)
+    assert evidence[0]["filename"] == "report.pdf"
+    assert evidence[0]["stable_file_id"] == "f_1"
+
+    # The snapshot survives the source row itself being deleted.
+    sources_repo.delete(sid)
+    evidence_after_delete = research_tasks_repo.list_evidence_for_finding(fid)
+    assert evidence_after_delete[0]["source_id"] is None
+    assert evidence_after_delete[0]["filename"] == "report.pdf"
+    assert evidence_after_delete[0]["stable_file_id"] == "f_1"
+
+
 def test_get_finding_for_task_in_version_is_scoped_correctly(temp_db):
     pid = projects_repo.get_or_create_id("P")
     task1 = research_tasks_repo.get_or_create_task(pid, "1", "The Landscape")

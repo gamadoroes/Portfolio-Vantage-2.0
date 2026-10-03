@@ -146,11 +146,28 @@ def _migrate_insights_version(project_id, stable_id_to_source_id, version_number
         for raw_text in phase.get("evidence_sources") or []:
             evidence_id = research_tasks_repo.create_evidence(project_id, raw_text)
             research_tasks_repo.link_finding_evidence(finding_id, evidence_id)
-        for stable_file_id in phase.get("linked_file_ids") or []:
+        linked_file_ids = phase.get("linked_file_ids") or []
+        linked_files = phase.get("linked_files") or []
+        for idx, stable_file_id in enumerate(linked_file_ids):
+            # The old JSON's linked_files/linked_file_ids are maintained as
+            # parallel arrays (see static/app.js linkFileToPhase), so the
+            # filename at this index IS this version's historical snapshot --
+            # prefer it over the live sources table, which may have since
+            # renamed or deleted the file. Only fall back to a live lookup
+            # when the JSON itself is missing the name (legacy/malformed data).
+            filename = linked_files[idx] if idx < len(linked_files) else None
             source_id = stable_id_to_source_id.get(stable_file_id)
-            if source_id is None:
-                continue
-            evidence_id = research_tasks_repo.create_evidence(project_id, None, source_id=source_id)
+            if filename is None and source_id is not None:
+                source_row = sources_repo.get_by_stable_id(project_id, stable_file_id)
+                if source_row is not None:
+                    filename = source_row["filename"]
+            evidence_id = research_tasks_repo.create_evidence(
+                project_id,
+                None,
+                source_id=source_id,
+                filename=filename,
+                stable_file_id=stable_file_id,
+            )
             research_tasks_repo.link_finding_evidence(finding_id, evidence_id)
 
     for phase_key, phase in (version_data.get("phases") or {}).items():

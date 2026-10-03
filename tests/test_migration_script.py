@@ -247,6 +247,159 @@ def test_migrates_research_run_with_dangling_artifact_id_without_crashing(temp_d
     assert report["Dangling Artifact Run Project"]["research_runs"] == 1
 
 
+def test_migrates_insights_history_linked_file_survives_later_source_deletion(temp_db, tmp_path):
+    # Regression test for I1 at the migration-script level: a historical
+    # insights_history.json entry linking a file must still show that file
+    # after the source is later deleted, same as the live-app regression
+    # test in test_insights_service.py.
+    from services import insights_service
+
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Linked File Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "files" / "report.pdf").write_text("content", encoding="utf-8")
+    (project_dir / "outputs").mkdir()
+    (project_dir / "file_index.json").write_text(
+        json.dumps({"version": 1, "files": {"f_abc": {"filename": "report.pdf",
+                     "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00"}}}),
+        encoding="utf-8",
+    )
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Linked File Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    (project_dir / "chat_history.json").write_text("{}", encoding="utf-8")
+    (project_dir / "research_runs.json").write_text("{}", encoding="utf-8")
+
+    phases = {str(i): {"title": f"Phase {i}", "summary": "MISSING", "confidence": "none",
+                        "evidence_sources": [], "gaps": [], "suggested_topics": [],
+                        "linked_files": [], "linked_file_ids": []} for i in range(1, 8)}
+    phases["1"] = {**phases["1"], "summary": "Version 1 summary", "confidence": "medium",
+                   "linked_files": ["report.pdf"], "linked_file_ids": ["f_abc"]}
+    (project_dir / "insights_history.json").write_text(
+        json.dumps([{"version": 1, "data": {
+            "generated_at": "2026-01-01T00:00:00", "competitors": [],
+            "competitor_landscape_markdown": "", "phases": phases,
+        }}]),
+        encoding="utf-8",
+    )
+
+    migrate_all_projects(str(projects_root))
+
+    pid = projects_repo.get_id("Linked File Project")
+    source = sources_repo.get_by_stable_id(pid, "f_abc")
+    sources_repo.delete(source["id"])
+
+    history = insights_service.load_insights_history("Linked File Project")
+    v1 = next(h for h in history if h["version"] == 1)
+    assert v1["data"]["phases"]["1"]["linked_files"] == ["report.pdf"]
+    assert v1["data"]["phases"]["1"]["linked_file_ids"] == ["f_abc"]
+
+
+def test_migrates_insights_history_linked_file_already_deleted_before_migration(temp_db, tmp_path):
+    # The file a historical version linked may already be gone by the time the
+    # one-shot migration runs (deleted before migration, not after). file_index.json
+    # won't have it, so stable_id_to_source_id has no entry -- the migration must
+    # still preserve the filename from insights_history.json's own linked_files
+    # array rather than silently dropping the link.
+    from services import insights_service
+
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Already Deleted Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "outputs").mkdir()
+    # file_index.json has NO entry for f_abc -- the file was deleted pre-migration
+    (project_dir / "file_index.json").write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Already Deleted Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    (project_dir / "chat_history.json").write_text("{}", encoding="utf-8")
+    (project_dir / "research_runs.json").write_text("{}", encoding="utf-8")
+
+    phases = {str(i): {"title": f"Phase {i}", "summary": "MISSING", "confidence": "none",
+                        "evidence_sources": [], "gaps": [], "suggested_topics": [],
+                        "linked_files": [], "linked_file_ids": []} for i in range(1, 8)}
+    phases["1"] = {**phases["1"], "summary": "Version 1 summary", "confidence": "medium",
+                   "linked_files": ["report.pdf"], "linked_file_ids": ["f_abc"]}
+    (project_dir / "insights_history.json").write_text(
+        json.dumps([{"version": 1, "data": {
+            "generated_at": "2026-01-01T00:00:00", "competitors": [],
+            "competitor_landscape_markdown": "", "phases": phases,
+        }}]),
+        encoding="utf-8",
+    )
+
+    migrate_all_projects(str(projects_root))
+
+    history = insights_service.load_insights_history("Already Deleted Project")
+    v1 = next(h for h in history if h["version"] == 1)
+    assert v1["data"]["phases"]["1"]["linked_files"] == ["report.pdf"]
+    assert v1["data"]["phases"]["1"]["linked_file_ids"] == ["f_abc"]
+
+
+def test_migrates_insights_history_linked_file_uses_historical_name_not_renamed_name(temp_db, tmp_path):
+    # A file may be renamed between when a historical version was saved and when
+    # the one-shot migration runs. insights_history.json's linked_files holds the
+    # name as it was AT SAVE TIME -- the migration must use that, not the file's
+    # current (renamed) name from file_index.json/sources, or it silently rewrites
+    # history.
+    from services import insights_service
+
+    projects_root = tmp_path / "projects"
+    project_dir = projects_root / "Renamed File Project"
+    (project_dir / "files").mkdir(parents=True)
+    (project_dir / "files" / "report_renamed.pdf").write_text("content", encoding="utf-8")
+    (project_dir / "outputs").mkdir()
+    # file_index.json reflects the CURRENT (renamed) filename
+    (project_dir / "file_index.json").write_text(
+        json.dumps({"version": 1, "files": {"f_abc": {"filename": "report_renamed.pdf",
+                     "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-02T00:00:00"}}}),
+        encoding="utf-8",
+    )
+    (project_dir / "config.json").write_text(
+        json.dumps({"name": "Renamed File Project", "created": "2026-01-01T00:00:00",
+                     "selected_files": [], "selected_file_ids": []}),
+        encoding="utf-8",
+    )
+    (project_dir / "metadata.json").write_text(
+        json.dumps({"description": "", "archived": False}), encoding="utf-8"
+    )
+    (project_dir / "artifacts.json").write_text("{}", encoding="utf-8")
+    (project_dir / "chat_history.json").write_text("{}", encoding="utf-8")
+    (project_dir / "research_runs.json").write_text("{}", encoding="utf-8")
+
+    phases = {str(i): {"title": f"Phase {i}", "summary": "MISSING", "confidence": "none",
+                        "evidence_sources": [], "gaps": [], "suggested_topics": [],
+                        "linked_files": [], "linked_file_ids": []} for i in range(1, 8)}
+    # At save time, the file was still named "report.pdf"
+    phases["1"] = {**phases["1"], "summary": "Version 1 summary", "confidence": "medium",
+                   "linked_files": ["report.pdf"], "linked_file_ids": ["f_abc"]}
+    (project_dir / "insights_history.json").write_text(
+        json.dumps([{"version": 1, "data": {
+            "generated_at": "2026-01-01T00:00:00", "competitors": [],
+            "competitor_landscape_markdown": "", "phases": phases,
+        }}]),
+        encoding="utf-8",
+    )
+
+    migrate_all_projects(str(projects_root))
+
+    history = insights_service.load_insights_history("Renamed File Project")
+    v1 = next(h for h in history if h["version"] == 1)
+    assert v1["data"]["phases"]["1"]["linked_files"] == ["report.pdf"]
+
+
 def test_migrates_chat_message_with_dangling_artifact_id_without_crashing(temp_db, tmp_path):
     # Same drift pattern again, this time for
     # project_messages.artefact_id -> artefacts.id. A chat message that

@@ -118,12 +118,13 @@ def get_finding_for_task_in_version(research_task_id, insight_version_id):
         ).fetchone()
 
 
-def create_evidence(project_id, raw_text, source_id=None):
+def create_evidence(project_id, raw_text, source_id=None, filename=None, stable_file_id=None):
     now = datetime.now().isoformat()
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO evidence (project_id, source_id, raw_text, created_at) VALUES (?, ?, ?, ?)",
-            (project_id, source_id, raw_text, now),
+            "INSERT INTO evidence (project_id, source_id, raw_text, filename, stable_file_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, source_id, raw_text, filename, stable_file_id, now),
         )
         return cur.lastrowid
 
