@@ -36,6 +36,15 @@ def list_sessions_for_project(project_id):
 def delete_session(id):
     with get_connection() as conn:
         conn.execute("DELETE FROM project_messages WHERE chat_session_id = ?", (id,))
+        # Detach (don't delete) any research_runs rows pointing at this
+        # session first: research_runs.chat_session_id is a nullable FK with
+        # no ON DELETE clause, and foreign_keys=ON, so deleting a session
+        # still referenced by a research run would raise
+        # sqlite3.IntegrityError. Setting chat_session_id to NULL preserves
+        # the research run row intact; it only degrades "linked to a chat
+        # session" to an orphaned/unlinked reference, which is the correct
+        # degrade path once the session is gone.
+        conn.execute("UPDATE research_runs SET chat_session_id = NULL WHERE chat_session_id = ?", (id,))
         conn.execute("DELETE FROM chat_sessions WHERE id = ?", (id,))
 
 

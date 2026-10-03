@@ -40,4 +40,16 @@ def rename(id, new_name):
 
 def delete(id):
     with get_connection() as conn:
+        # Detach (don't delete) any rows in OTHER tables pointing at this
+        # artefact first: both research_runs.artefact_id and
+        # project_messages.artefact_id are nullable FKs with no ON DELETE
+        # clause, and foreign_keys=ON, so deleting an artefact still
+        # referenced by either would raise sqlite3.IntegrityError. Setting
+        # artefact_id to NULL on each preserves the referencing rows --
+        # research runs and chat messages alike -- intact; it only degrades
+        # "linked to a generated artefact" to an orphaned/unlinked
+        # reference, which is the correct degrade path once the artefact is
+        # gone.
+        conn.execute("UPDATE project_messages SET artefact_id = NULL WHERE artefact_id = ?", (id,))
+        conn.execute("UPDATE research_runs SET artefact_id = NULL WHERE artefact_id = ?", (id,))
         conn.execute("DELETE FROM artefacts WHERE id = ?", (id,))

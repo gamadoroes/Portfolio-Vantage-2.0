@@ -1,5 +1,5 @@
 # tests/test_repositories_chat.py
-from db.repositories import chat_repo, projects_repo
+from db.repositories import chat_repo, projects_repo, research_runs_repo
 
 
 def test_create_and_get_session(temp_db):
@@ -51,3 +51,22 @@ def test_delete_session_removes_messages(temp_db):
     chat_repo.delete_session("chat_1")
     assert chat_repo.get_session("chat_1") is None
     assert chat_repo.list_messages("chat_1") == []
+
+
+def test_delete_session_referenced_by_research_run_does_not_raise(temp_db):
+    """Regression test: research_runs.chat_session_id has no ON DELETE
+    clause and foreign_keys=ON, so deleting a chat session still referenced
+    by a research run used to raise sqlite3.IntegrityError. delete_session()
+    must detach the run's chat_session_id instead of cascading, so the run
+    row survives with chat_session_id NULL.
+    """
+    pid = projects_repo.get_or_create_id("P")
+    chat_repo.create_session("chat_1", pid, "Chat")
+    research_runs_repo.create("run_1", pid, "resp_1", "chat_1", "prompt preview")
+
+    chat_repo.delete_session("chat_1")  # must not raise
+
+    assert chat_repo.get_session("chat_1") is None
+    run = research_runs_repo.get("run_1")
+    assert run is not None
+    assert run["chat_session_id"] is None
