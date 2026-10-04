@@ -97,6 +97,13 @@ def test_reviewing_to_waiting_for_human_requires_flag(temp_db):
         research_task_service.transition_task(task_id, "WAITING_FOR_HUMAN")
 
 
+def test_reviewing_to_waiting_for_human_succeeds_when_flag_set(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _make_task(pid, status="REVIEWING", human_review_required=1)
+    research_task_service.transition_task(task_id, "WAITING_FOR_HUMAN")
+    assert research_work_items_repo.get(task_id)["status"] == "WAITING_FOR_HUMAN"
+
+
 def test_running_to_failed_increments_retry_count(temp_db):
     pid = projects_repo.get_or_create_id("P")
     task_id = _make_task(pid, status="RUNNING")
