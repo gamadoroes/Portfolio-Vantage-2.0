@@ -1,7 +1,9 @@
 from flask import Flask
 import os
+import threading
 
 from config import Config
+from db import migrate_runner
 from routes.ai import ai_bp
 from routes.artifacts import artifacts_bp
 from routes.chats import chats_bp
@@ -32,6 +34,20 @@ def create_app():
     app.register_blueprint(ai_bp)
     app.register_blueprint(research_tasks_bp)
     app.register_blueprint(supervisor_bp)
+
+    # Bring the schema up to date on the first request, not here: `from app import
+    # app` runs create_app() at import time, and importing must not modify a database.
+    schema_lock = threading.Lock()
+    schema_ready = {"done": False}
+
+    @app.before_request
+    def ensure_schema_is_current():
+        if schema_ready["done"]:
+            return
+        with schema_lock:
+            if not schema_ready["done"]:
+                migrate_runner.apply_migrations()
+                schema_ready["done"] = True
 
     return app
 
