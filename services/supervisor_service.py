@@ -16,18 +16,31 @@ from .project_service import load_project_prompt
 MAX_CONTEXT_CHARS = 60000
 MAX_FILE_ANALYSIS_TOTAL_CHARS = 60000
 MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
+MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
 
 
-def _format_work_item(item, dependencies):
+def _clip_run_output(text):
+    text = text if isinstance(text, str) else str(text or "")
+    if len(text) <= MAX_RUN_OUTPUT_PREVIEW_CHARS:
+        return text
+    return text[:MAX_RUN_OUTPUT_PREVIEW_CHARS] + "...[truncated]"
+
+
+def _format_work_item(item, dependencies, run=None):
     dep_ids = [d["depends_on_work_item_id"] for d in dependencies]
     dep_text = f" | depends on: {dep_ids}" if dep_ids else ""
-    return (
+    line = (
         f"- id={item['id']} phase={item['phase_key']} title=\"{item['title']}\" "
         f"status={item['status']} priority={item['priority']} "
         f"completeness={item['completeness_score']} evidence={item['evidence_score']} "
         f"retry={item['retry_count']}/{item['max_retries']} "
         f"human_review_required={bool(item['human_review_required'])}{dep_text}"
     )
+    if run is not None:
+        line += f" | run_status={run['status']}"
+        if run["output_text"]:
+            line += f" | run_output=\"{_clip_run_output(run['output_text'])}\""
+    return line
 
 
 def build_context(project_name):
@@ -54,7 +67,14 @@ def build_context(project_name):
     )
 
     items = research_work_items_repo.list_for_project(project_id)
-    item_lines = [_format_work_item(item, research_work_items_repo.list_dependencies(item["id"])) for item in items]
+    item_lines = [
+        _format_work_item(
+            item,
+            research_work_items_repo.list_dependencies(item["id"]),
+            research_runs_repo.find_latest_for_work_item(item["id"]),
+        )
+        for item in items
+    ]
     blocks.append(
         "# RESEARCH TASKS\n\n" + ("\n".join(item_lines) if item_lines else "(no research tasks yet)")
     )

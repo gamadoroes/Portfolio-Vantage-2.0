@@ -1,7 +1,7 @@
 import pytest
 
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
-from services import insights_service, project_service, research_task_service, supervisor_service
+from services import insights_service, project_service, supervisor_service
 
 
 def test_build_context_includes_objective(temp_db):
@@ -42,6 +42,19 @@ def test_build_context_includes_work_items_and_dependencies(temp_db):
     assert "Product / La Trobe" in context
     assert "Product / Torrens" in context
     assert str(a) in context  # the dependency should be visible by id
+
+
+def test_build_context_includes_run_status_and_output_for_work_item(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task with a run")
+    research_runs_repo.create("run_1", pid, None, None, "preview")
+    research_runs_repo.update(
+        "run_1", research_work_item_id=task_id, status="completed", output_text="some finding"
+    )
+
+    context = supervisor_service.build_context("P")
+    assert "completed" in context
+    assert "some finding" in context
 
 
 def test_build_context_includes_recent_decisions(temp_db):
