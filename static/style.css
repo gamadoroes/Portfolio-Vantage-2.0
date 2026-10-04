@@ -1124,6 +1124,84 @@ mark.selection-highlight { background: rgba(255, 138, 0, 0.25); border-bottom: 2
     background: #e6f4f6;
 }
 
+#supervisor-panel {
+    margin-top: 1.5rem;
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: #fafbfc;
+}
+.supervisor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+}
+.supervisor-header h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--oes-ink);
+}
+.btn-run-supervisor {
+    font-size: 0.8rem;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 4px;
+    background: var(--oes-valencia, #FF8A00);
+    color: white;
+    cursor: pointer;
+    font-weight: 600;
+}
+.btn-run-supervisor:hover {
+    opacity: 0.9;
+}
+.btn-run-supervisor:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.supervisor-status {
+    font-size: 0.75rem;
+    margin-bottom: 0.4rem;
+}
+.supervisor-decision-log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+.supervisor-decision-row {
+    font-size: 0.78rem;
+    padding: 6px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: white;
+}
+.supervisor-action {
+    font-weight: 700;
+    color: var(--oes-ink);
+    margin-right: 6px;
+}
+.supervisor-outcome-success {
+    color: #28a745;
+}
+.supervisor-outcome-error {
+    color: #dc3545;
+}
+.supervisor-reason {
+    margin-top: 3px;
+    color: #666;
+    font-style: italic;
+}
+.supervisor-decision-empty {
+    font-size: 0.75rem;
+    color: #999;
+    list-style: none;
+}
+
 /* =========================================
    16. PHASE NAVIGATION BAR
    ========================================= */

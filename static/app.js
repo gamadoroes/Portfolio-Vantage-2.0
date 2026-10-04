@@ -2123,6 +2123,8 @@ function renderInsights(data, { showTasks = !viewingHistoricalVersion } = {}) {
     renderPhaseNavBar(data);
     setupPhaseNavObserver();
     if (showTasks) refreshPhaseTaskPanels();
+    if (showTasks) ensureSupervisorPanel();
+    if (!showTasks) hideSupervisorPanel();
 }
 
 function escapeAttr(str) {
@@ -2641,6 +2643,87 @@ async function transitionResearchTask(taskId, newStatus) {
     } catch (e) {
         alert('Could not change status: ' + e.message);
     } finally {
+        refreshPhaseTaskPanels();
+    }
+}
+
+function ensureSupervisorPanel() {
+    if (document.getElementById('supervisor-panel')) {
+        refreshSupervisorDecisions();
+        return;
+    }
+    const phasesContainer = document.getElementById('insight-phases');
+    if (!phasesContainer || !phasesContainer.parentNode) return;
+    const panel = document.createElement('div');
+    panel.id = 'supervisor-panel';
+    panel.innerHTML = `
+        <div class="supervisor-header">
+            <h3>Research Supervisor</h3>
+            <button id="run-supervisor-btn" class="btn-run-supervisor" onclick="runSupervisor()">Run Supervisor</button>
+        </div>
+        <div id="supervisor-status" class="supervisor-status"></div>
+        <ul id="supervisor-decision-log" class="supervisor-decision-log"></ul>
+    `;
+    phasesContainer.parentNode.insertBefore(panel, phasesContainer.nextSibling);
+    refreshSupervisorDecisions();
+}
+
+function hideSupervisorPanel() {
+    const panel = document.getElementById('supervisor-panel');
+    if (panel) panel.remove();
+}
+
+function renderSupervisorDecisionRow(decision) {
+    const input = decision.detail && decision.detail.input ? decision.detail.input : {};
+    const execution = decision.detail && decision.detail.execution ? decision.detail.execution : {};
+    const taskRef = decision.research_work_item_id ? ` (task #${decision.research_work_item_id})` : '';
+    const outcomeClass = execution.success ? 'supervisor-outcome-success' : 'supervisor-outcome-error';
+    const outcomeText = execution.success
+        ? 'succeeded'
+        : `failed: ${escapeHtml(execution.error || 'unknown error')}`;
+    const reason = input.reason ? escapeHtml(input.reason) : '';
+    return `<li class="supervisor-decision-row">
+        <span class="supervisor-action">${escapeHtml(decision.decision_type)}${taskRef}</span>
+        <span class="${outcomeClass}">${outcomeText}</span>
+        ${reason ? `<div class="supervisor-reason">${reason}</div>` : ''}
+    </li>`;
+}
+
+async function refreshSupervisorDecisions() {
+    const log = document.getElementById('supervisor-decision-log');
+    if (!log || !currentProject) return;
+    try {
+        const res = await fetch(`/api/supervisor/decisions?project=${encodeURIComponent(currentProject)}`);
+        const json = await res.json();
+        const decisions = Array.isArray(json.decisions) ? json.decisions : [];
+        log.innerHTML = decisions.length
+            ? decisions.map(renderSupervisorDecisionRow).join('')
+            : '<li class="supervisor-decision-empty">No decisions yet.</li>';
+    } catch (e) {
+        console.error('[supervisor] failed to load decisions:', e);
+    }
+}
+
+async function runSupervisor() {
+    const btn = document.getElementById('run-supervisor-btn');
+    const statusEl = document.getElementById('supervisor-status');
+    if (btn) { btn.disabled = true; btn.innerText = 'Running...'; }
+    if (statusEl) statusEl.innerText = '';
+    try {
+        const res = await fetch('/api/supervisor/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: currentProject })
+        });
+        const json = await res.json();
+        if (json.success === false) {
+            if (statusEl) statusEl.innerHTML = `<span class="supervisor-outcome-error">${escapeHtml(json.error || 'Supervisor run failed')}</span>`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.innerHTML = `<span class="supervisor-outcome-error">${escapeHtml(e.message)}</span>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerText = 'Run Supervisor'; }
+        refreshSupervisorDecisions();
         refreshPhaseTaskPanels();
     }
 }
