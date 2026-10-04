@@ -1253,7 +1253,7 @@ function viewPreviousInsightsVersion() {
     currentInsightsVersion--;
     const entry = insightsHistory[currentInsightsVersion - 1];
     currentInsightsData = entry.data;
-    renderInsights(entry.data);
+    renderInsights(entry.data, { showTasks: false });
 
     const statusEl = document.getElementById('insights-status');
     if (statusEl) {
@@ -1267,7 +1267,7 @@ function viewNextInsightsVersion() {
     currentInsightsVersion++;
     const entry = insightsHistory[currentInsightsVersion - 1];
     currentInsightsData = entry.data;
-    renderInsights(entry.data);
+    renderInsights(entry.data, { showTasks: false });
 
     const statusEl = document.getElementById('insights-status');
     const isLatest = currentInsightsVersion === insightsHistory.length;
@@ -2011,7 +2011,7 @@ function normalizeInsightsData(data, validFiles, fileIndexMap) {
     }
 }
 
-function renderInsights(data) {
+function renderInsights(data, { showTasks = true } = {}) {
     const grid = document.getElementById('competitor-grid');
     const downloadJsonBtn = document.getElementById('download-json-btn');
     const downloadReportBtn = document.getElementById('download-report-btn');
@@ -2097,6 +2097,8 @@ function renderInsights(data) {
                         ${topicsHtml}
                     </div>
                     ${renderPhaseLinkedFiles(key, phase)}
+                    ${showTasks ? renderTaskSummaryLine(phase.task_summary) : ''}
+                    ${showTasks ? `<div class="phase-task-panel" id="phase-task-panel-${key}" onclick="event.stopPropagation()"></div>` : ''}
                     ${hasContent ? '<div class="phase-edit-hint">Click to edit</div>' : ''}
                 </div>`;
         });
@@ -2105,6 +2107,7 @@ function renderInsights(data) {
     renderExcludedCompetitors();
     renderPhaseNavBar(data);
     setupPhaseNavObserver();
+    if (showTasks) refreshPhaseTaskPanels();
 }
 
 function escapeAttr(str) {
@@ -2513,6 +2516,118 @@ function renderPhaseLinkedFiles(phaseKey, phase) {
         <div class="linked-files-header">${countLabel}${dropdown}</div>
         ${chips ? `<div class="linked-files-chips">${chips}</div>` : ''}
     </div>`;
+}
+
+const TASK_TRANSITIONS = {
+    PROPOSED: ['READY', 'SKIPPED'],
+    READY: ['RUNNING', 'SKIPPED'],
+    RUNNING: ['REVIEWING', 'FAILED', 'COMPLETE'],
+    REVIEWING: ['COMPLETE', 'FOLLOW_UP_REQUIRED', 'WAITING_FOR_HUMAN'],
+    WAITING_FOR_HUMAN: ['REVIEWING', 'COMPLETE', 'FAILED'],
+    FOLLOW_UP_REQUIRED: ['READY'],
+    FAILED: ['READY', 'SKIPPED'],
+    COMPLETE: [],
+    SKIPPED: [],
+};
+
+function renderTaskSummaryLine(taskSummary) {
+    if (!taskSummary || !taskSummary.status_counts) return '';
+    const counts = taskSummary.status_counts;
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    if (total === 0) return '';
+    const completed = counts.COMPLETE || 0;
+    const parts = [`${completed} of ${total} task${total > 1 ? 's' : ''} complete`];
+    if (taskSummary.weakest_completeness !== null && taskSummary.weakest_completeness !== undefined) {
+        parts.push(`weakest completeness ${taskSummary.weakest_completeness}`);
+    }
+    if (taskSummary.merged_gaps && taskSummary.merged_gaps.length) {
+        parts.push(`${taskSummary.merged_gaps.length} open gap${taskSummary.merged_gaps.length > 1 ? 's' : ''}`);
+    }
+    return `<div class="task-summary-line" onclick="event.stopPropagation()">${parts.join(' &middot; ')}</div>`;
+}
+
+function renderTaskList(phaseKey, tasks) {
+    const addBtn = `<button class="btn-add-task" onclick="event.stopPropagation(); promptCreateResearchTask('${phaseKey}')">+ Add task</button>`;
+    if (!tasks.length) {
+        return `<div class="task-list-empty">No research tasks yet.</div>${addBtn}`;
+    }
+    const rows = tasks.map(t => {
+        const entities = (t.entities && t.entities.length)
+            ? ` <span class="task-entities">(${t.entities.map(escapeHtml).join(', ')})</span>`
+            : '';
+        const options = (TASK_TRANSITIONS[t.status] || [])
+            .map(s => `<option value="${s}">${s}</option>`).join('');
+        return `<li class="task-row" data-task-id="${t.id}">
+            <span class="task-status-badge task-status-${t.status}">${t.status}</span>
+            <span class="task-title">${escapeHtml(t.title)}</span>${entities}
+            <select class="task-transition-select" onchange="event.stopPropagation(); if(this.value){transitionResearchTask(${t.id}, this.value);} this.value='';">
+                <option value="">Change status&hellip;</option>
+                ${options}
+            </select>
+        </li>`;
+    }).join('');
+    return `<ul class="task-list">${rows}</ul>${addBtn}`;
+}
+
+async function refreshPhaseTaskPanels() {
+    if (!currentProject) return;
+    let tasks = [];
+    try {
+        const res = await fetch(`/api/research-tasks?project=${encodeURIComponent(currentProject)}`);
+        const json = await res.json();
+        tasks = Array.isArray(json.tasks) ? json.tasks : [];
+    } catch (e) {
+        console.error('[research-tasks] failed to load:', e);
+        return;
+    }
+    const byPhase = {};
+    tasks.forEach(t => {
+        const key = t.phase_key || '';
+        if (!byPhase[key]) byPhase[key] = [];
+        byPhase[key].push(t);
+    });
+    document.querySelectorAll('.phase-task-panel').forEach(panel => {
+        const key = panel.id.replace('phase-task-panel-', '');
+        panel.innerHTML = renderTaskList(key, byPhase[key] || []);
+    });
+}
+
+function promptCreateResearchTask(phaseKey) {
+    const title = (prompt('Task title (e.g. "Product / La Trobe"):') || '').trim();
+    if (!title) return;
+    createResearchTask(phaseKey, title);
+}
+
+async function createResearchTask(phaseKey, title) {
+    try {
+        const res = await fetch('/api/research-tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: currentProject, phase_key: phaseKey, title })
+        });
+        const json = await res.json();
+        if (!json.success) alert('Could not create task: ' + (json.error || 'unknown error'));
+    } catch (e) {
+        alert('Could not create task: ' + e.message);
+    } finally {
+        refreshPhaseTaskPanels();
+    }
+}
+
+async function transitionResearchTask(taskId, newStatus) {
+    try {
+        const res = await fetch(`/api/research-tasks/${taskId}/transition`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: newStatus })
+        });
+        const json = await res.json();
+        if (!json.success) alert('Could not change status: ' + (json.error || 'unknown error'));
+    } catch (e) {
+        alert('Could not change status: ' + e.message);
+    } finally {
+        refreshPhaseTaskPanels();
+    }
 }
 
 async function populateCompetitorFromSource() {
