@@ -228,3 +228,28 @@ def test_compute_phase_rollup_ignores_other_phases(temp_db):
     research_work_items_repo.create(pid, "1", "Other phase task")
     rollup = research_task_service.compute_phase_rollup(pid, "4")
     assert rollup["status_counts"] == {}
+
+
+def test_set_review_scores_updates_only_provided_fields(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_task_service.set_review_scores(task_id, completeness_score=0.7)
+    row = research_work_items_repo.get(task_id)
+    assert row["completeness_score"] == 0.7
+    assert row["evidence_score"] is None
+
+
+def test_set_review_scores_serializes_gaps_to_json(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_task_service.set_review_scores(task_id, identified_gaps=["Missing pricing"])
+    row = research_work_items_repo.get(task_id)
+    assert row["identified_gaps_json"] == '["Missing pricing"]'
+
+
+def test_flag_for_human_review_sets_flag(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_task_service.flag_for_human_review(task_id)
+    row = research_work_items_repo.get(task_id)
+    assert row["human_review_required"] == 1

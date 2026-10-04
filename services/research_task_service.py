@@ -130,3 +130,19 @@ def compute_phase_rollup(project_id, phase_key):
         "weakest_completeness": weakest_completeness,
         "merged_gaps": merged_gaps,
     }
+
+
+def set_review_scores(task_id, completeness_score=None, evidence_score=None, identified_gaps=None):
+    fields = {}
+    if completeness_score is not None:
+        fields["completeness_score"] = completeness_score
+    if evidence_score is not None:
+        fields["evidence_score"] = evidence_score
+    if identified_gaps is not None:
+        fields["identified_gaps_json"] = json.dumps(identified_gaps)
+    if fields:
+        research_work_items_repo.update_fields(task_id, **fields)
+
+
+def flag_for_human_review(task_id):
+    research_work_items_repo.update_fields(task_id, human_review_required=1)

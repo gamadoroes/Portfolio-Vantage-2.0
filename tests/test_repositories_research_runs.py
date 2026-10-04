@@ -50,3 +50,29 @@ def test_find_recent_duplicate_ignores_completed_runs(temp_db):
     cutoff = (datetime.now() - timedelta(seconds=30)).isoformat()
     found = research_runs_repo.find_recent_running_or_queued_with_preview(pid, "same preview", cutoff)
     assert found is None
+
+
+def test_find_latest_for_work_item(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    research_runs_repo.create("run_1", pid, None, None, "first")
+    research_runs_repo.update("run_1", research_work_item_id=5)
+    research_runs_repo.create("run_2", pid, None, None, "second")
+    research_runs_repo.update("run_2", research_work_item_id=5)
+
+    latest = research_runs_repo.find_latest_for_work_item(5)
+    assert latest["id"] == "run_2"
+
+
+def test_find_latest_for_work_item_none_when_no_runs(temp_db):
+    assert research_runs_repo.find_latest_for_work_item(9999) is None
+
+
+def test_find_latest_for_work_item_scoped_to_correct_item(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    research_runs_repo.create("run_a", pid, None, None, "for item 1")
+    research_runs_repo.update("run_a", research_work_item_id=1)
+    research_runs_repo.create("run_b", pid, None, None, "for item 2")
+    research_runs_repo.update("run_b", research_work_item_id=2)
+
+    assert research_runs_repo.find_latest_for_work_item(1)["id"] == "run_a"
+    assert research_runs_repo.find_latest_for_work_item(2)["id"] == "run_b"

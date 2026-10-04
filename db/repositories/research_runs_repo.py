@@ -46,3 +46,12 @@ def find_recent_running_or_queued_with_preview(project_id, prompt_preview, cutof
             "ORDER BY created_at DESC LIMIT 1",
             (project_id, prompt_preview, cutoff_iso),
         ).fetchone()
+
+
+def find_latest_for_work_item(work_item_id):
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM research_runs WHERE research_work_item_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (work_item_id,),
+        ).fetchone()

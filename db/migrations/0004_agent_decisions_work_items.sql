@@ -5,7 +5,7 @@
 -- research_work_items instead, via this new column.
 -- See docs/superpowers/specs/2026-10-04-research-supervisor-design.md section 3.
 
-ALTER TABLE agent_decisions ADD COLUMN research_work_item_id INTEGER REFERENCES research_work_items(id);
+ALTER TABLE agent_decisions ADD COLUMN research_work_item_id INTEGER;
 
 -- FILE_ANALYSIS research runs complete synchronously via Claude, not via
 -- OpenAI's response_id-based polling, so there's nowhere today to store
