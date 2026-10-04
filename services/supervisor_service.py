@@ -2,7 +2,7 @@
 import json
 from datetime import datetime
 
-from db.repositories import agent_decisions_repo, projects_repo, research_work_items_repo
+from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 
 from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
 from .file_index_service import HIDDEN_SOURCE_FILES, reconcile_file_index, reconcile_selected_file_ids
@@ -380,3 +380,31 @@ def handle_dispatch_task(project_name, tool_input):
 
 
 TOOL_HANDLERS["dispatch_task"] = handle_dispatch_task
+
+
+def handle_review_outcome(project_name, tool_input):
+    task_id = tool_input["task_id"]
+    outcome = tool_input["outcome"]
+    run = research_runs_repo.find_latest_for_work_item(task_id)
+    if run is None or run["status"] == "running":
+        raise ValueError(f"No finished run to review for task {task_id}")
+
+    research_task_service.set_review_scores(
+        task_id,
+        completeness_score=tool_input.get("completeness_score"),
+        evidence_score=tool_input.get("evidence_score"),
+        identified_gaps=tool_input.get("identified_gaps"),
+    )
+
+    if outcome == "FAILED":
+        # REVIEWING has no FAILED edge in Phase 2's transition table -- must
+        # go directly from RUNNING, or this would raise ValueError.
+        research_task_service.transition_task(task_id, "FAILED")
+    else:
+        research_task_service.transition_task(task_id, "REVIEWING")
+        research_task_service.transition_task(task_id, outcome)
+
+    return {"task_id": task_id, "outcome": outcome, "run_id": run["id"]}
+
+
+TOOL_HANDLERS["review_outcome"] = handle_review_outcome

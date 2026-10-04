@@ -300,3 +300,71 @@ def test_handle_dispatch_task_raises_for_unknown_task(temp_db):
         supervisor_service.handle_dispatch_task("P", {
             "task_id": 9999, "research_method": "FILE_ANALYSIS", "reason": "x",
         })
+
+
+def _dispatched_task_with_run(pid, status="completed"):
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(task_id, status="RUNNING")
+    run_id = f"run_{task_id}"
+    research_runs_repo.create(run_id, pid, None, None, "preview")
+    research_runs_repo.update(run_id, research_work_item_id=task_id, status=status)
+    return task_id
+
+
+def test_handle_review_outcome_raises_when_no_finished_run(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="running")
+    with pytest.raises(ValueError):
+        supervisor_service.handle_review_outcome("P", {
+            "task_id": task_id, "outcome": "COMPLETE", "reason": "x",
+        })
+
+
+def test_handle_review_outcome_raises_when_no_run_at_all(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(task_id, status="RUNNING")
+    with pytest.raises(ValueError):
+        supervisor_service.handle_review_outcome("P", {
+            "task_id": task_id, "outcome": "COMPLETE", "reason": "x",
+        })
+
+
+def test_handle_review_outcome_complete_goes_through_reviewing(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="completed")
+    result = supervisor_service.handle_review_outcome("P", {
+        "task_id": task_id, "outcome": "COMPLETE", "completeness_score": 0.9,
+        "evidence_score": 0.8, "identified_gaps": [], "reason": "fully answered",
+    })
+    assert result["outcome"] == "COMPLETE"
+    row = research_work_items_repo.get(task_id)
+    assert row["status"] == "COMPLETE"
+    assert row["completeness_score"] == 0.9
+
+
+def test_handle_review_outcome_follow_up_required(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="completed")
+    result = supervisor_service.handle_review_outcome("P", {
+        "task_id": task_id, "outcome": "FOLLOW_UP_REQUIRED",
+        "identified_gaps": ["Missing authoritative source"], "reason": "weak evidence",
+    })
+    assert result["outcome"] == "FOLLOW_UP_REQUIRED"
+    row = research_work_items_repo.get(task_id)
+    assert row["status"] == "FOLLOW_UP_REQUIRED"
+    assert row["identified_gaps_json"] == '["Missing authoritative source"]'
+
+
+def test_handle_review_outcome_failed_skips_reviewing(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="failed")
+    result = supervisor_service.handle_review_outcome("P", {
+        "task_id": task_id, "outcome": "FAILED", "reason": "run errored out",
+    })
+    assert result["outcome"] == "FAILED"
+    row = research_work_items_repo.get(task_id)
+    assert row["status"] == "FAILED"
+    # No exception was raised getting here -- confirms RUNNING->FAILED was taken
+    # directly, since RUNNING->REVIEWING->FAILED is illegal per Phase 2's table
+    # (REVIEWING has no FAILED edge) and would have raised ValueError instead.
