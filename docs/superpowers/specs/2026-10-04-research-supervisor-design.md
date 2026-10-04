@@ -365,13 +365,25 @@ there.
 prerequisite: every key in `PHASE_DEFINITIONS` (phases `"1"` through
 `"6"` — phase `"7"` is the synthesis itself, excluded from its own
 prerequisite) has at least one `research_work_items` row with
-`status="COMPLETE"` for this project. If not satisfied: returns
-`{"success": False, "error": "Phases missing completed research: <list>"}`
-— logged as a rejected decision, not executed, not a crash. If satisfied:
-invokes the *existing* Phase 7 chat-generation code path (the same one the
-"Generate"/"Refresh" button on the Phase 7 card already calls via
-`/api/chat` with `insight_type="phase-7"`) — this phase does not rebuild
-or duplicate that logic, it calls into it.
+`status="COMPLETE"` for this project. If not satisfied: raises
+`ValueError("Phases missing completed research: <list>")` — caught by the
+same orchestration catch-point as every other handler's illegal-state
+error (§7), logged as a rejected decision, not executed, not a crash.
+
+**Resolved during plan-writing (the existing Phase 7 path is a streaming
+SSE route, not something callable synchronously without either
+refactoring `routes/ai.py` or inventing new streaming-consumer plumbing —
+both avoided):** if satisfied, this handler does **not** call into the
+existing `/api/chat` route. It follows the same pattern as `dispatch_task`'s
+`FILE_ANALYSIS` case (§4.3, §2) — a new, minimal, non-streaming backend
+prompt, built from the phases 1-6 summaries already available via
+`insights_service.load_current_insights`, sent through
+`llm_service.prompt_completion` synchronously. The result is written back
+via the *existing*, already-safe `insights_service.save_insights` (merging
+into `phases["7"]`), so the next time a human opens the Insights tab the
+Phase 7 card shows the supervisor's synthesis exactly as if a human had
+generated it — just via a plainer prompt than the rich one the "Generate"
+button on that card uses. `routes/ai.py` is not modified by this phase.
 
 ### 4.9 `no_action`
 
