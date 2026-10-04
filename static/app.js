@@ -1046,7 +1046,13 @@ async function migrateArtifactsToFiles() {
 let currentInsightsData = null;
 let insightsHistory = [];
 let currentInsightsVersion = null;
-let insightsCache = {}; // Per-project insights state: { projectName: { data, history, version, statusHtml } }
+let insightsCache = {}; // Per-project insights state: { projectName: { data, history, version, statusHtml, viewingHistoricalVersion } }
+// Single source of truth for whether the insights UI is currently showing a
+// frozen historical version (vs. the live/current data). renderInsights()'s
+// showTasks default derives from this flag, so ANY re-render call site —
+// known or future — automatically suppresses the live task panel while
+// browsing history, rather than relying on each call site to opt in.
+let viewingHistoricalVersion = false;
 
 // --- Per-Project Insights Cache ---
 function saveInsightsToCache(project) {
@@ -1056,7 +1062,8 @@ function saveInsightsToCache(project) {
         data: currentInsightsData,
         history: insightsHistory,
         version: currentInsightsVersion,
-        statusHtml: statusEl ? statusEl.innerHTML : ''
+        statusHtml: statusEl ? statusEl.innerHTML : '',
+        viewingHistoricalVersion: viewingHistoricalVersion
     };
 }
 
@@ -1066,6 +1073,10 @@ function restoreInsightsFromCache(project) {
     currentInsightsData = cached.data;
     insightsHistory = cached.history || [];
     currentInsightsVersion = cached.version || null;
+    // Restore whatever historical/live view state this project was left in,
+    // so switching projects mid-history-browse doesn't leak the live task
+    // panel onto still-historical data (or vice versa).
+    viewingHistoricalVersion = !!cached.viewingHistoricalVersion;
     renderInsights(currentInsightsData);
     const statusEl = document.getElementById('insights-status');
     if (statusEl && cached.statusHtml) statusEl.innerHTML = cached.statusHtml;
@@ -1083,6 +1094,7 @@ function updateCacheForProject(project, data) {
 
 function resetInsightsUI() {
     currentInsightsData = null;
+    viewingHistoricalVersion = false;
     const grid = document.getElementById('competitor-grid');
     if (grid) {
         grid.innerHTML = `<div class="empty-state">Upload files and click 'Generate Insights' to analyse competitors.</div>`;
@@ -1253,7 +1265,8 @@ function viewPreviousInsightsVersion() {
     currentInsightsVersion--;
     const entry = insightsHistory[currentInsightsVersion - 1];
     currentInsightsData = entry.data;
-    renderInsights(entry.data, { showTasks: false });
+    viewingHistoricalVersion = true;
+    renderInsights(entry.data);
 
     const statusEl = document.getElementById('insights-status');
     if (statusEl) {
@@ -1267,7 +1280,8 @@ function viewNextInsightsVersion() {
     currentInsightsVersion++;
     const entry = insightsHistory[currentInsightsVersion - 1];
     currentInsightsData = entry.data;
-    renderInsights(entry.data, { showTasks: false });
+    viewingHistoricalVersion = true;
+    renderInsights(entry.data);
 
     const statusEl = document.getElementById('insights-status');
     const isLatest = currentInsightsVersion === insightsHistory.length;
@@ -1900,6 +1914,7 @@ async function handleInsightResponse(text, genId) {
         // Update live state + UI if still on the same project
         if (!projectMismatch) {
             currentInsightsData = targetInsightsData;
+            viewingHistoricalVersion = false;
             renderInsights(currentInsightsData);
             if(statusEl) statusEl.innerHTML = `Latest — ${new Date(currentInsightsData.generated_at).toLocaleString()} <button onclick="downloadInsights()" class="small-btn">JSON</button>`;
             // Keep cache in sync
@@ -2011,7 +2026,7 @@ function normalizeInsightsData(data, validFiles, fileIndexMap) {
     }
 }
 
-function renderInsights(data, { showTasks = true } = {}) {
+function renderInsights(data, { showTasks = !viewingHistoricalVersion } = {}) {
     const grid = document.getElementById('competitor-grid');
     const downloadJsonBtn = document.getElementById('download-json-btn');
     const downloadReportBtn = document.getElementById('download-report-btn');
@@ -4530,6 +4545,10 @@ async function loadProject(options) {
     // the in-memory currentInsightsData so it can't be clobbered by a
     // stale or not-yet-written insights.json on disk.
     if (reloadInsights) {
+        // Reloading insights from disk always lands on the live/current
+        // view, never a lingering historical flag from whatever was being
+        // viewed before (possibly in a different project).
+        viewingHistoricalVersion = false;
         if (projectData.files && projectData.files['insights.json']) {
             try {
                 const loaded = JSON.parse(projectData.files['insights.json']);
