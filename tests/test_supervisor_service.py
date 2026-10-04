@@ -140,3 +140,93 @@ def test_handle_request_human_review_transitions_when_reviewing(temp_db):
 def test_handle_request_human_review_raises_for_unknown_task(temp_db):
     with pytest.raises(ValueError):
         supervisor_service.handle_request_human_review("P", {"task_id": 9999, "reason": "x"})
+
+
+def test_handle_propose_tasks_creates_tasks(temp_db):
+    projects_repo.get_or_create_id("P")
+    result = supervisor_service.handle_propose_tasks("P", {
+        "tasks": [{"phase_key": "4", "title": "Product / La Trobe"}],
+        "reason": "initial plan",
+    })
+    assert len(result["created_task_ids"]) == 1
+    row = research_work_items_repo.get(result["created_task_ids"][0])
+    assert row["title"] == "Product / La Trobe"
+    assert row["status"] == "PROPOSED"
+
+
+def test_handle_propose_tasks_wires_existing_id_dependency(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    existing_id = research_work_items_repo.create(pid, "1", "Landscape task")
+    result = supervisor_service.handle_propose_tasks("P", {
+        "tasks": [{"phase_key": "4", "title": "Dependent task", "depends_on_existing_ids": [existing_id]}],
+        "reason": "needs landscape first",
+    })
+    new_id = result["created_task_ids"][0]
+    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(new_id)]
+    assert deps == [existing_id]
+
+
+def test_handle_propose_tasks_wires_batch_index_dependency_to_real_id(temp_db):
+    projects_repo.get_or_create_id("P")
+    result = supervisor_service.handle_propose_tasks("P", {
+        "tasks": [
+            {"phase_key": "4", "title": "Depends on second task", "depends_on_batch_indices": [1]},
+            {"phase_key": "4", "title": "The second task"},
+        ],
+        "reason": "ordering matters",
+    })
+    first_id, second_id = result["created_task_ids"]
+    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(first_id)]
+    # Must be the SECOND task's real database id -- not the literal index "1".
+    assert deps == [second_id]
+
+
+def test_handle_propose_tasks_cycle_raises_value_error(temp_db):
+    # Two tasks in the SAME batch mutually depending on each other via
+    # batch indices is a genuine cycle: the handler creates both tasks
+    # first, then wires dependencies in array order. Wiring task 0 -> task 1
+    # succeeds (no edges exist yet); wiring task 1 -> task 0 immediately
+    # after closes a real two-node cycle, since task 0 already depends on
+    # task 1 at that point.
+    projects_repo.get_or_create_id("P")
+    with pytest.raises(ValueError, match="cycle"):
+        supervisor_service.handle_propose_tasks("P", {
+            "tasks": [
+                {"phase_key": "4", "title": "X", "depends_on_batch_indices": [1]},
+                {"phase_key": "4", "title": "Y", "depends_on_batch_indices": [0]},
+            ],
+            "reason": "mutually dependent tasks",
+        })
+
+
+def test_handle_create_followup_task_marks_original_and_creates_dependency(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    original_id = research_work_items_repo.create(pid, "4", "Product / Torrens")
+    research_work_items_repo.update_fields(original_id, status="REVIEWING")
+
+    result = supervisor_service.handle_create_followup_task("P", {
+        "task_id": original_id,
+        "followup_title": "Verify Torrens tuition fee from official source",
+        "followup_objective": "Find an authoritative source for the current tuition fee.",
+        "research_method": "TARGETED_WEB",
+        "priority": "high",
+        "reason": "Current fee was not from an authoritative source.",
+    })
+
+    original_row = research_work_items_repo.get(original_id)
+    assert original_row["status"] == "FOLLOW_UP_REQUIRED"
+
+    followup_id = result["followup_task_id"]
+    followup_row = research_work_items_repo.get(followup_id)
+    assert followup_row["title"] == "Verify Torrens tuition fee from official source"
+    assert followup_row["phase_key"] == "4"
+
+    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(original_id)]
+    assert deps == [followup_id]
+
+
+def test_handle_create_followup_task_raises_for_unknown_task(temp_db):
+    with pytest.raises(ValueError):
+        supervisor_service.handle_create_followup_task("P", {
+            "task_id": 9999, "followup_title": "x", "reason": "x",
+        })

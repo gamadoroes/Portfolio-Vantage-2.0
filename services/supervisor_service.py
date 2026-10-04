@@ -241,3 +241,54 @@ TOOL_HANDLERS = {
     "no_action": handle_no_action,
     "request_human_review": handle_request_human_review,
 }
+
+
+def handle_propose_tasks(project_name, tool_input):
+    project_id = projects_repo.get_or_create_id(project_name)
+    tasks_input = tool_input["tasks"]
+    new_ids = []
+    for t in tasks_input:
+        task_id = research_task_service.create_task(
+            project_id,
+            t["phase_key"],
+            t["title"],
+            objective=t.get("objective"),
+            priority=t.get("priority"),
+            entities=t.get("entities"),
+            expected_output=t.get("expected_output"),
+        )
+        new_ids.append(task_id)
+
+    for i, t in enumerate(tasks_input):
+        task_id = new_ids[i]
+        for dep_id in t.get("depends_on_existing_ids") or []:
+            research_task_service.add_dependency(task_id, dep_id)
+        for dep_index in t.get("depends_on_batch_indices") or []:
+            research_task_service.add_dependency(task_id, new_ids[dep_index])
+
+    return {"created_task_ids": new_ids}
+
+
+def handle_create_followup_task(project_name, tool_input):
+    project_id = projects_repo.get_or_create_id(project_name)
+    original_id = tool_input["task_id"]
+    original = research_work_items_repo.get(original_id)
+    if original is None:
+        raise ValueError(f"No such research task: {original_id}")
+
+    research_task_service.transition_task(original_id, "FOLLOW_UP_REQUIRED")
+    new_id = research_task_service.create_task(
+        project_id,
+        original["phase_key"],
+        tool_input["followup_title"],
+        objective=tool_input.get("followup_objective"),
+        priority=tool_input.get("priority"),
+        research_method=tool_input.get("research_method"),
+    )
+    research_task_service.add_dependency(original_id, new_id)
+
+    return {"original_task_id": original_id, "followup_task_id": new_id}
+
+
+TOOL_HANDLERS["propose_tasks"] = handle_propose_tasks
+TOOL_HANDLERS["create_followup_task"] = handle_create_followup_task
