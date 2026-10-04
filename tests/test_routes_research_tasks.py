@@ -75,6 +75,22 @@ def test_list_tasks_serializes_json_array_fields(client):
     assert resp.get_json()["tasks"][0]["entities"] == ["La Trobe", "Torrens"]
 
 
+def test_list_tasks_returns_a_current_summary_for_every_phase(client):
+    # The page redraws each phase's "N of M tasks complete" line from this after every
+    # change; without it the line stays frozen at whatever it said when the page loaded.
+    _create_project(client)
+    done_id = client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "A"}).get_json()["id"]
+    client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "B"})
+    for status in ("READY", "RUNNING", "COMPLETE"):
+        client.post(f"/api/research-tasks/{done_id}/transition", json={"status": status})
+
+    summaries = client.get("/api/research-tasks", query_string={"project": "P"}).get_json()["phase_summaries"]
+
+    assert sorted(summaries) == ["1", "2", "3", "4", "5", "6", "7"]
+    assert summaries["4"]["status_counts"] == {"COMPLETE": 1, "PROPOSED": 1}
+    assert summaries["1"]["status_counts"] == {}  # a phase with no tasks is present, and empty
+
+
 def test_transition_task_route(client):
     _create_project(client)
     create_resp = client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "A"})

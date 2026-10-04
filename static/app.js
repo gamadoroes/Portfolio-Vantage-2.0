@@ -2535,9 +2535,12 @@ function renderPhaseLinkedFiles(phaseKey, phase) {
     </div>`;
 }
 
+// Status changes offered by hand. RUNNING is deliberately not offered from READY: only the
+// Supervisor's dispatch starts research, so a hand-set RUNNING has nothing behind it and
+// strands the task (the Supervisor then waits for research that will never finish).
 const TASK_TRANSITIONS = {
     PROPOSED: ['READY', 'SKIPPED'],
-    READY: ['RUNNING', 'SKIPPED'],
+    READY: ['SKIPPED'],
     RUNNING: ['REVIEWING', 'FAILED', 'COMPLETE'],
     REVIEWING: ['COMPLETE', 'FOLLOW_UP_REQUIRED', 'WAITING_FOR_HUMAN'],
     WAITING_FOR_HUMAN: ['REVIEWING', 'COMPLETE', 'FAILED'],
@@ -2589,10 +2592,12 @@ function renderTaskList(phaseKey, tasks) {
 async function refreshPhaseTaskPanels() {
     if (!currentProject) return;
     let tasks = [];
+    let phaseSummaries = {};
     try {
         const res = await fetch(`/api/research-tasks?project=${encodeURIComponent(currentProject)}`);
         const json = await res.json();
         tasks = Array.isArray(json.tasks) ? json.tasks : [];
+        phaseSummaries = json.phase_summaries || {};
     } catch (e) {
         console.error('[research-tasks] failed to load:', e);
         return;
@@ -2606,7 +2611,17 @@ async function refreshPhaseTaskPanels() {
     document.querySelectorAll('.phase-task-panel').forEach(panel => {
         const key = panel.id.replace('phase-task-panel-', '');
         panel.innerHTML = renderTaskList(key, byPhase[key] || []);
+        if (key in phaseSummaries) setTaskSummaryLine(panel, phaseSummaries[key]);
     });
+}
+
+// The "N of M tasks complete" line sits directly above its phase's task panel. Redraw it
+// in place (or add/remove it, as the task count crosses zero) so it tracks every change.
+function setTaskSummaryLine(panel, taskSummary) {
+    const existing = panel.previousElementSibling;
+    if (existing && existing.classList.contains('task-summary-line')) existing.remove();
+    const html = renderTaskSummaryLine(taskSummary);
+    if (html) panel.insertAdjacentHTML('beforebegin', html);
 }
 
 function promptCreateResearchTask(phaseKey) {

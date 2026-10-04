@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request, session
 
 from db.repositories import projects_repo, research_work_items_repo
 from services import research_task_service
+from services.phases import PHASE_DEFINITIONS
 from services.project_service import normalize_project_name, project_exists
 
 research_tasks_bp = Blueprint("research_tasks", __name__)
@@ -81,7 +82,12 @@ def list_tasks_route():
         rows = research_work_items_repo.list_for_phase(project_id, phase_key)
     else:
         rows = research_work_items_repo.list_for_project(project_id)
-    return jsonify({"tasks": [_serialize_task(r) for r in rows]})
+    # Every phase's roll-up, regardless of the filter, so the page can redraw each
+    # phase's "N of M tasks complete" line after a change without reloading insights.
+    phase_summaries = {
+        key: research_task_service.compute_phase_rollup(project_id, key) for key in PHASE_DEFINITIONS
+    }
+    return jsonify({"tasks": [_serialize_task(r) for r in rows], "phase_summaries": phase_summaries})
 
 
 @research_tasks_bp.route("/api/research-tasks/<int:task_id>/transition", methods=["POST"])
