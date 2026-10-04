@@ -53,8 +53,104 @@ def test_build_context_includes_run_status_and_output_for_work_item(temp_db):
     )
 
     context = supervisor_service.build_context("P")
-    assert "completed" in context
+    assert "run_status=completed" in context
     assert "some finding" in context
+
+
+def _task_with_run(pid, title, run_id, task_status, run_status, output_text):
+    task_id = research_work_items_repo.create(pid, "4", title)
+    research_work_items_repo.update_fields(task_id, status=task_status)
+    research_runs_repo.create(run_id, pid, None, None, "preview")
+    research_runs_repo.update(
+        run_id, research_work_item_id=task_id, status=run_status, output_text=output_text
+    )
+    return task_id
+
+
+def test_build_context_omits_run_fields_when_task_has_no_run(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    research_work_items_repo.create(pid, "4", "Task without a run")
+
+    context = supervisor_service.build_context("P")
+    assert "run_status=" not in context
+    assert "run_output" not in context
+
+
+def test_build_context_omits_run_output_when_run_has_no_output(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    _task_with_run(pid, "Empty run", "run_1", "RUNNING", "completed", None)
+
+    context = supervisor_service.build_context("P")
+    assert "run_status=completed" in context
+    assert "run_output" not in context
+
+
+def test_build_context_shows_full_output_for_task_awaiting_review(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    output = "A" * 4000 + "FINDING_MARKER" + "B" * 500
+    task_id = _task_with_run(pid, "Awaiting review", "run_1", "RUNNING", "completed", output)
+
+    context = supervisor_service.build_context("P")
+    assert f"<run_output task_id={task_id}>" in context
+    assert "FINDING_MARKER" in context
+    assert "...[truncated]" not in context
+
+
+def test_build_context_shows_full_output_for_task_whose_run_failed(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    output = "A" * 4000 + "FAILURE_MARKER"
+    _task_with_run(pid, "Failed run", "run_1", "RUNNING", "failed", output)
+
+    context = supervisor_service.build_context("P")
+    assert "FAILURE_MARKER" in context
+
+
+def test_build_context_shows_only_short_preview_for_already_reviewed_task(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    output = "A" * 4000 + "FINDING_MARKER"
+    _task_with_run(pid, "Reviewed", "run_1", "COMPLETE", "completed", output)
+
+    context = supervisor_service.build_context("P")
+    assert "FINDING_MARKER" not in context
+    assert "...[truncated]" in context
+    assert "<run_output" not in context
+
+
+def test_build_context_shows_only_short_preview_while_run_still_running(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    output = "A" * 4000 + "PARTIAL_MARKER"
+    _task_with_run(pid, "In flight", "run_1", "RUNNING", "running", output)
+
+    context = supervisor_service.build_context("P")
+    assert "PARTIAL_MARKER" not in context
+    assert "<run_output" not in context
+
+
+def test_build_context_flattens_short_preview_onto_the_task_line(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    output = 'line one\n- a "quoted" bullet\n# Heading'
+    _task_with_run(pid, "Markdown output", "run_1", "COMPLETE", "completed", output)
+
+    context = supervisor_service.build_context("P")
+    assert "run_output=\"line one - a 'quoted' bullet # Heading\"" in context
+
+
+def test_build_context_caps_total_output_shown_for_tasks_awaiting_review(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_ids = [
+        _task_with_run(pid, f"Awaiting {i}", f"run_{i}", "RUNNING", "completed", "x" * 20000)
+        for i in range(5)
+    ]
+
+    context = supervisor_service.build_context("P")
+    expected_full = (
+        supervisor_service.MAX_REVIEW_OUTPUT_TOTAL_CHARS // supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS
+    )
+    assert context.count("<run_output task_id=") == expected_full
+    assert "context truncated" not in context
+    # Tasks past the budget must still be listed, not dropped.
+    for task_id in task_ids:
+        assert f"- id={task_id} " in context
 
 
 def test_build_context_includes_recent_decisions(temp_db):

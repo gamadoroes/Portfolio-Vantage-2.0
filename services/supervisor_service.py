@@ -16,17 +16,30 @@ from .project_service import load_project_prompt
 MAX_CONTEXT_CHARS = 60000
 MAX_FILE_ANALYSIS_TOTAL_CHARS = 60000
 MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
+# A task awaiting review needs enough of its run output for the supervisor to
+# score completeness/evidence; every other task only needs a short reminder.
 MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
+MAX_RUN_OUTPUT_REVIEW_CHARS = 8000
+MAX_REVIEW_OUTPUT_TOTAL_CHARS = 24000
 
 
-def _clip_run_output(text):
+def _clip_run_output(text, limit):
     text = text if isinstance(text, str) else str(text or "")
-    if len(text) <= MAX_RUN_OUTPUT_PREVIEW_CHARS:
+    if len(text) <= limit:
         return text
-    return text[:MAX_RUN_OUTPUT_PREVIEW_CHARS] + "...[truncated]"
+    return text[:limit] + "...[truncated]"
 
 
-def _format_work_item(item, dependencies, run=None):
+def _awaiting_review(item, run):
+    return (
+        run is not None
+        and run["output_text"]
+        and item["status"] == "RUNNING"
+        and run["status"] != "running"
+    )
+
+
+def _format_work_item(item, dependencies, run=None, review_output_limit=None):
     dep_ids = [d["depends_on_work_item_id"] for d in dependencies]
     dep_text = f" | depends on: {dep_ids}" if dep_ids else ""
     line = (
@@ -36,11 +49,22 @@ def _format_work_item(item, dependencies, run=None):
         f"retry={item['retry_count']}/{item['max_retries']} "
         f"human_review_required={bool(item['human_review_required'])}{dep_text}"
     )
-    if run is not None:
-        line += f" | run_status={run['status']}"
-        if run["output_text"]:
-            line += f" | run_output=\"{_clip_run_output(run['output_text'])}\""
-    return line
+    if run is None:
+        return line
+
+    line += f" | run_status={run['status']}"
+    output = run["output_text"]
+    if not output:
+        return line
+    if review_output_limit is not None:
+        # Delimited block: the output is markdown and would otherwise break the
+        # one-task-per-line structure of the RESEARCH TASKS section.
+        return (
+            f"{line}\n<run_output task_id={item['id']}>\n"
+            f"{_clip_run_output(output, review_output_limit)}\n</run_output>"
+        )
+    flattened = " ".join(output.split()).replace('"', "'")
+    return f'{line} | run_output="{_clip_run_output(flattened, MAX_RUN_OUTPUT_PREVIEW_CHARS)}"'
 
 
 def build_context(project_name):
@@ -67,14 +91,19 @@ def build_context(project_name):
     )
 
     items = research_work_items_repo.list_for_project(project_id)
-    item_lines = [
-        _format_work_item(
-            item,
-            research_work_items_repo.list_dependencies(item["id"]),
-            research_runs_repo.find_latest_for_work_item(item["id"]),
+    item_lines = []
+    review_budget = MAX_REVIEW_OUTPUT_TOTAL_CHARS
+    for item in items:
+        run = research_runs_repo.find_latest_for_work_item(item["id"])
+        review_output_limit = None
+        if _awaiting_review(item, run) and review_budget >= MAX_RUN_OUTPUT_REVIEW_CHARS:
+            review_output_limit = MAX_RUN_OUTPUT_REVIEW_CHARS
+            review_budget -= min(len(run["output_text"]), review_output_limit)
+        item_lines.append(
+            _format_work_item(
+                item, research_work_items_repo.list_dependencies(item["id"]), run, review_output_limit
+            )
         )
-        for item in items
-    ]
     blocks.append(
         "# RESEARCH TASKS\n\n" + ("\n".join(item_lines) if item_lines else "(no research tasks yet)")
     )
