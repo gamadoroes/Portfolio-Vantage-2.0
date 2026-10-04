@@ -69,3 +69,64 @@ def _assert_dependencies_satisfied(work_item_id):
         dep = research_work_items_repo.get(dep_id)
         if dep is None or dep["status"] not in ("COMPLETE", "SKIPPED"):
             raise ValueError(f"Cannot move to READY: dependency {dep_id} is not complete")
+
+
+def add_dependency(work_item_id, depends_on_work_item_id):
+    if work_item_id == depends_on_work_item_id:
+        raise ValueError("A task cannot depend on itself")
+    item = research_work_items_repo.get(work_item_id)
+    dep = research_work_items_repo.get(depends_on_work_item_id)
+    if item is None or dep is None:
+        raise ValueError("Task not found")
+    if item["project_id"] != dep["project_id"]:
+        raise ValueError("Dependencies must be within the same project")
+    if _creates_cycle(depends_on_work_item_id, work_item_id):
+        raise ValueError("This dependency would create a cycle")
+    research_work_items_repo.add_dependency(work_item_id, depends_on_work_item_id)
+
+
+def _creates_cycle(start_id, target_id):
+    """True if target_id is reachable from start_id by following existing
+    depends_on edges -- i.e. adding (target_id depends_on start_id) would
+    close a loop."""
+    visited = set()
+    stack = [start_id]
+    while stack:
+        current = stack.pop()
+        if current == target_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        for row in research_work_items_repo.list_dependencies(current):
+            stack.append(row["depends_on_work_item_id"])
+    return False
+
+
+def compute_phase_rollup(project_id, phase_key):
+    items = research_work_items_repo.list_for_phase(project_id, phase_key)
+
+    status_counts = {}
+    for item in items:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+
+    completed_scores = [
+        item["completeness_score"] for item in items
+        if item["status"] == "COMPLETE" and item["completeness_score"] is not None
+    ]
+    weakest_completeness = min(completed_scores) if completed_scores else None
+
+    merged_gaps = []
+    seen_gaps = set()
+    for item in items:
+        gaps = json.loads(item["identified_gaps_json"]) if item["identified_gaps_json"] else []
+        for gap in gaps:
+            if gap not in seen_gaps:
+                seen_gaps.add(gap)
+                merged_gaps.append(gap)
+
+    return {
+        "status_counts": status_counts,
+        "weakest_completeness": weakest_completeness,
+        "merged_gaps": merged_gaps,
+    }

@@ -148,3 +148,83 @@ def test_proposed_to_ready_allowed_once_dependency_complete(temp_db):
 def test_transition_unknown_task_raises(temp_db):
     with pytest.raises(ValueError):
         research_task_service.transition_task(9999, "READY")
+
+
+def test_add_dependency_rejects_self_reference(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "A")
+    with pytest.raises(ValueError):
+        research_task_service.add_dependency(task_id, task_id)
+
+
+def test_add_dependency_rejects_cross_project(temp_db):
+    pid1 = projects_repo.get_or_create_id("P1")
+    pid2 = projects_repo.get_or_create_id("P2")
+    a = research_work_items_repo.create(pid1, "4", "A")
+    b = research_work_items_repo.create(pid2, "4", "B")
+    with pytest.raises(ValueError):
+        research_task_service.add_dependency(a, b)
+
+
+def test_add_dependency_rejects_direct_cycle(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    a = research_work_items_repo.create(pid, "4", "A")
+    b = research_work_items_repo.create(pid, "4", "B")
+    research_task_service.add_dependency(a, b)  # A depends on B
+    with pytest.raises(ValueError):
+        research_task_service.add_dependency(b, a)  # B depends on A -- direct cycle
+
+
+def test_add_dependency_rejects_transitive_cycle(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    a = research_work_items_repo.create(pid, "4", "A")
+    b = research_work_items_repo.create(pid, "4", "B")
+    c = research_work_items_repo.create(pid, "4", "C")
+    research_task_service.add_dependency(a, b)  # A depends on B
+    research_task_service.add_dependency(b, c)  # B depends on C
+    with pytest.raises(ValueError):
+        research_task_service.add_dependency(c, a)  # C depends on A -- closes the loop
+
+
+def test_add_dependency_allows_diamond_shape(temp_db):
+    # A depends on B and C; both B and C depend on D. Not a cycle.
+    pid = projects_repo.get_or_create_id("P")
+    a = research_work_items_repo.create(pid, "4", "A")
+    b = research_work_items_repo.create(pid, "4", "B")
+    c = research_work_items_repo.create(pid, "4", "C")
+    d = research_work_items_repo.create(pid, "4", "D")
+    research_task_service.add_dependency(a, b)
+    research_task_service.add_dependency(a, c)
+    research_task_service.add_dependency(b, d)
+    research_task_service.add_dependency(c, d)  # must not raise
+    assert len(research_work_items_repo.list_dependencies(a)) == 2
+
+
+def test_compute_phase_rollup_empty_phase(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    rollup = research_task_service.compute_phase_rollup(pid, "4")
+    assert rollup == {"status_counts": {}, "weakest_completeness": None, "merged_gaps": []}
+
+
+def test_compute_phase_rollup_counts_and_scores(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    t1 = research_work_items_repo.create(pid, "4", "A")
+    research_work_items_repo.update_fields(t1, status="COMPLETE", completeness_score=0.9,
+                                            identified_gaps_json='["Missing pricing"]')
+    t2 = research_work_items_repo.create(pid, "4", "B")
+    research_work_items_repo.update_fields(t2, status="COMPLETE", completeness_score=0.4,
+                                            identified_gaps_json='["Missing pricing", "No faculty data"]')
+    t3 = research_work_items_repo.create(pid, "4", "C")
+    research_work_items_repo.update_fields(t3, status="RUNNING")
+
+    rollup = research_task_service.compute_phase_rollup(pid, "4")
+    assert rollup["status_counts"] == {"COMPLETE": 2, "RUNNING": 1}
+    assert rollup["weakest_completeness"] == 0.4
+    assert rollup["merged_gaps"] == ["Missing pricing", "No faculty data"]
+
+
+def test_compute_phase_rollup_ignores_other_phases(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    research_work_items_repo.create(pid, "1", "Other phase task")
+    rollup = research_task_service.compute_phase_rollup(pid, "4")
+    assert rollup["status_counts"] == {}
