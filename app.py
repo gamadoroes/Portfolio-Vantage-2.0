@@ -9,6 +9,7 @@ from routes.files import files_bp
 from routes.main import main_bp
 from routes.prompts import prompts_bp
 from routes.projects import projects_bp
+from routes.research_tasks import research_tasks_bp
 
 
 def create_app():
@@ -28,6 +29,7 @@ def create_app():
     app.register_blueprint(artifacts_bp)
     app.register_blueprint(prompts_bp)
     app.register_blueprint(ai_bp)
+    app.register_blueprint(research_tasks_bp)
 
     return app
 
