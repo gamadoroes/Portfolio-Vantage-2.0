@@ -24,7 +24,53 @@ def test_apply_migrations_is_idempotent(temp_db):
     apply_migrations()
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
-    assert count == 2
+    assert count == 3
+
+
+def test_research_work_items_schema(temp_db):
+    with get_connection() as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert {"research_work_items", "research_work_item_dependencies"}.issubset(tables)
+
+        work_item_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(research_work_items)").fetchall()
+        }
+        expected_columns = {
+            "id", "project_id", "phase_key", "title", "objective", "status", "priority",
+            "research_method", "entities_json", "expected_output", "source_requirements_json",
+            "completeness_score", "evidence_score", "identified_gaps_json", "retry_count",
+            "max_retries", "human_review_required", "created_at", "updated_at",
+        }
+        assert expected_columns.issubset(work_item_columns)
+
+        dep_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(research_work_item_dependencies)").fetchall()
+        }
+        assert {"work_item_id", "depends_on_work_item_id", "created_at"}.issubset(dep_columns)
+
+        run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(research_runs)").fetchall()}
+        assert "research_work_item_id" in run_columns
+
+        artefact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(artefacts)").fetchall()}
+        assert "research_work_item_id" in artefact_columns
+
+
+def test_research_work_items_default_status_is_proposed(temp_db):
+    from db.repositories import projects_repo
+    pid = projects_repo.get_or_create_id("P")
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO research_work_items (project_id, phase_key, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, '2026-01-01', '2026-01-01')",
+            (pid, "4", "Product / La Trobe"),
+        )
+        row = conn.execute("SELECT status FROM research_work_items WHERE project_id = ?", (pid,)).fetchone()
+        assert row["status"] == "PROPOSED"
 
 
 def test_evidence_table_has_filename_snapshot_columns(temp_db):
