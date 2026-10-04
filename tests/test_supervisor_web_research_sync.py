@@ -1,0 +1,183 @@
+from types import SimpleNamespace
+
+import pytest
+
+from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
+from services import supervisor_service
+
+
+def _web_task_with_run(pid, title, run_id, response_id="resp_1", run_status="running", output_text=None):
+    task_id = research_work_items_repo.create(pid, "4", title)
+    research_work_items_repo.update_fields(task_id, status="RUNNING")
+    research_runs_repo.create(run_id, pid, response_id, None, "prompt")
+    research_runs_repo.update(
+        run_id, research_work_item_id=task_id, status=run_status, output_text=output_text
+    )
+    return task_id
+
+
+def _openai_response(status, text=None, citation=None, error=None):
+    """Shaped like a real OpenAI Responses object (see test_deep_research_citations)."""
+    content = []
+    if text:
+        annotations = []
+        if citation:
+            title, url = citation
+            annotations = [SimpleNamespace(type="url_citation", start_index=0, end_index=0, title=title, url=url)]
+        content = [SimpleNamespace(type="output_text", text=text, annotations=annotations)]
+    return SimpleNamespace(
+        id="resp_1",
+        status=status,
+        output_text=text,
+        output=[SimpleNamespace(type="message", content=content)] if content else [],
+        error=error,
+        last_error=None,
+    )
+
+
+def _serve(monkeypatch, responses):
+    """Make retrieve_deep_research answer from {response_id: response-or-exception}; record the lookups."""
+    looked_up = []
+
+    def retrieve(response_id):
+        looked_up.append(response_id)
+        answer = responses[response_id]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(supervisor_service.openai_service, "retrieve_deep_research", retrieve)
+    return looked_up
+
+
+def test_sync_saves_finished_web_research_text_and_sources(temp_db, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    _serve(monkeypatch, {"resp_1": _openai_response(
+        "completed", "The fee is $40,000.", citation=("Fee schedule", "https://example.com/fees"),
+    )})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    run = research_runs_repo.get("run_1")
+    assert run["status"] == "completed"
+    assert "The fee is $40,000." in run["output_text"]
+    # The supervisor scores evidence, so it must be able to see where claims came from.
+    assert "Fee schedule" in run["output_text"]
+    assert "https://example.com/fees" in run["output_text"]
+
+
+def test_sync_fills_in_text_for_a_run_the_browser_already_marked_completed(temp_db, monkeypatch):
+    # The existing browser poller flips status to "completed" but never saves the text.
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1", run_status="completed", output_text=None)
+    _serve(monkeypatch, {"resp_1": _openai_response("completed", "The fee is $40,000.")})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    assert "The fee is $40,000." in research_runs_repo.get("run_1")["output_text"]
+
+
+@pytest.mark.parametrize("openai_status", ["queued", "in_progress"])
+def test_sync_leaves_research_that_is_still_running_alone(temp_db, monkeypatch, openai_status):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    _serve(monkeypatch, {"resp_1": _openai_response(openai_status)})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    run = research_runs_repo.get("run_1")
+    assert run["status"] == "running"
+    assert not run["output_text"]
+
+
+def test_sync_marks_research_that_failed_as_failed_with_the_reason(temp_db, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    _serve(monkeypatch, {"resp_1": _openai_response("failed", error=SimpleNamespace(message="rate limit hit"))})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    run = research_runs_repo.get("run_1")
+    assert run["status"] == "failed"
+    assert "rate limit hit" in run["error"]
+
+
+def test_sync_marks_research_that_finished_without_any_text_as_failed(temp_db, monkeypatch):
+    # Otherwise the supervisor would review an empty report, and the run would be
+    # looked up again on every cycle forever.
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    _serve(monkeypatch, {"resp_1": _openai_response("completed", text=None)})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    assert research_runs_repo.get("run_1")["status"] == "failed"
+
+
+def test_sync_does_not_look_up_runs_that_need_nothing(temp_db, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    # A file-analysis run still in flight: no text yet, but nothing at OpenAI to look up.
+    _web_task_with_run(pid, "File analysis", "run_a", response_id=None, run_status="running", output_text=None)
+    _web_task_with_run(pid, "Already saved", "run_b", response_id="resp_b", run_status="completed", output_text="saved")
+    _web_task_with_run(pid, "Already failed", "run_c", response_id="resp_c", run_status="failed")
+    looked_up = _serve(monkeypatch, {})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    assert looked_up == []
+
+
+def test_sync_survives_a_failed_lookup_and_still_syncs_the_other_runs(temp_db, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Flaky", "run_1", response_id="resp_1")
+    _web_task_with_run(pid, "Fine", "run_2", response_id="resp_2")
+    _serve(monkeypatch, {
+        "resp_1": RuntimeError("network down"),
+        "resp_2": _openai_response("completed", "All good."),
+    })
+
+    supervisor_service.sync_web_research_runs("P")  # must not raise
+
+    assert research_runs_repo.get("run_1")["status"] == "running"  # untouched, retried next cycle
+    assert "All good." in research_runs_repo.get("run_2")["output_text"]
+
+
+class _FakeToolUseBlock:
+    type = "tool_use"
+
+    def __init__(self, name, input):
+        self.name = name
+        self.input = input
+
+
+class _CapturingClient:
+    def __init__(self, tool_name, tool_input):
+        self.calls = []
+        self.messages = SimpleNamespace(create=self._create)
+        self._response = SimpleNamespace(content=[_FakeToolUseBlock(tool_name, tool_input)])
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._response
+
+
+@pytest.fixture
+def app_context():
+    from app import create_app
+
+    with create_app().app_context():
+        yield
+
+
+def test_supervisor_cycle_shows_the_model_the_web_research_that_just_finished(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    _serve(monkeypatch, {"resp_1": _openai_response("completed", "The fee is $40,000.")})
+    client = _CapturingClient("no_action", {"reason": "nothing to do"})
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
+
+    supervisor_service.run_supervisor_cycle("P")
+
+    prompt_sent_to_model = client.calls[0]["messages"][0]["content"]
+    assert "The fee is $40,000." in prompt_sent_to_model

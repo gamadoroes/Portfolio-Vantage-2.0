@@ -8,6 +8,7 @@ from flask import current_app
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 
 from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
+from .deep_research_output import extract_deep_research_output
 from .file_index_service import HIDDEN_SOURCE_FILES, reconcile_file_index, reconcile_selected_file_ids
 from .file_service import load_project_files
 from .phases import PHASE_DEFINITIONS
@@ -540,8 +541,83 @@ SUPERVISOR_SYSTEM_PROMPT = (
 )
 
 
+def _needs_web_sync(run):
+    # Only web runs have a response_id (file analysis does not). The browser poller can
+    # flip a run to "completed" without ever saving its text, so "no text yet" counts
+    # as pending too, not just "running".
+    return (
+        run is not None
+        and bool(run["response_id"])
+        and not run["output_text"]
+        and run["status"] in ("running", "completed")
+    )
+
+
+def _web_research_error(response):
+    for attr in ("error", "last_error"):
+        err = getattr(response, attr, None)
+        if not err:
+            continue
+        if isinstance(err, dict):
+            return err.get("message") or str(err)
+        if isinstance(err, str):
+            return err
+        return getattr(err, "message", None) or str(err)
+    return None
+
+
+def _format_web_research_output(text, citations):
+    # Sources go first: build_context clips from the end, and the supervisor needs
+    # them to judge how well-evidenced the findings are.
+    lines = [
+        f"[{c['index']}] {c['title']} - {c['url']}" if c["type"] == "url" else f"[{c['index']}] {c['filename']}"
+        for c in citations
+    ]
+    if not lines:
+        return text
+    return "Sources:\n" + "\n".join(lines) + "\n\n" + text
+
+
+def sync_web_research_runs(project_name):
+    """Pull the outcome of TARGETED_WEB runs from OpenAI into research_runs.
+
+    Done by the supervisor itself on every cycle, so web research completes and becomes
+    reviewable without a browser tab open (the browser poller only ever saves a status).
+    """
+    project_id = projects_repo.get_or_create_id(project_name)
+    for item in research_work_items_repo.list_for_project(project_id):
+        run = research_runs_repo.find_latest_for_work_item(item["id"])
+        if not _needs_web_sync(run):
+            continue
+        try:
+            response = openai_service.retrieve_deep_research(run["response_id"])
+        except Exception as exc:  # one flaky lookup must not block the whole cycle
+            print(f"[supervisor] could not check web research run {run['id']}: {exc}")
+            continue
+
+        status = getattr(response, "status", None)
+        if status == "completed":
+            text, _markdown, citations = extract_deep_research_output(response)
+            if text:
+                research_run_service.update_run(
+                    project_name, run["id"], status="completed",
+                    output_text=_format_web_research_output(text, citations),
+                    completed_at=datetime.now().isoformat(),
+                )
+            else:
+                research_run_service.fail_run(
+                    project_name, run["id"], "OpenAI reported the research finished but returned no text"
+                )
+        elif status in ("failed", "incomplete", "cancelled"):
+            research_run_service.fail_run(
+                project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
+            )
+        # queued / in_progress: still working; checked again next cycle.
+
+
 def run_supervisor_cycle(project_name):
     project_id = projects_repo.get_or_create_id(project_name)
+    sync_web_research_runs(project_name)
     context_text = build_context(project_name)
 
     client = anthropic.Anthropic(api_key=current_app.config["ANTHROPIC_API_KEY"])
