@@ -3,6 +3,7 @@ import json
 
 from db.repositories import excluded_competitors_repo, projects_repo, research_tasks_repo, sources_repo
 
+from . import research_task_service
 from .phases import PHASE_DEFINITIONS
 
 
@@ -92,11 +93,15 @@ def _build_phase_data(version_id, phase_key, task_id):
 
 def _build_insights_payload(project_id, version_row):
     if version_row is None:
+        phases = {}
+        for key in PHASE_DEFINITIONS:
+            phases[key] = _empty_phase_payload(key)
+            phases[key]["task_summary"] = research_task_service.compute_phase_rollup(project_id, key)
         return {
             "generated_at": "",
             "competitors": [],
             "competitor_landscape_markdown": "",
-            "phases": {key: _empty_phase_payload(key) for key in PHASE_DEFINITIONS},
+            "phases": phases,
         }
 
     tasks_by_phase = {
@@ -111,6 +116,7 @@ def _build_insights_payload(project_id, version_row):
             phases[phase_key] = _empty_phase_payload(phase_key)
         else:
             phases[phase_key] = _build_phase_data(version_row["id"], phase_key, task_id)
+        phases[phase_key]["task_summary"] = research_task_service.compute_phase_rollup(project_id, phase_key)
 
     return {
         "generated_at": version_row["generated_at"],

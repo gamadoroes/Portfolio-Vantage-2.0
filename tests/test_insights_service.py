@@ -1,5 +1,5 @@
 # tests/test_insights_service.py
-from db.repositories import projects_repo, sources_repo
+from db.repositories import projects_repo, research_work_items_repo, sources_repo
 from services import insights_service
 
 
@@ -121,3 +121,26 @@ def test_load_insights_history_for_project_with_no_saves_is_empty_list(temp_db):
 def test_excluded_competitors_round_trip(temp_db):
     insights_service.save_excluded_competitors("P", ["Comp A", "Comp B"])
     assert set(insights_service.load_excluded_competitors("P")) == {"Comp A", "Comp B"}
+
+
+def test_task_summary_present_even_with_no_findings(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    research_work_items_repo.create(pid, "4", "Product / La Trobe")
+
+    loaded = insights_service.load_current_insights("P")
+    assert loaded["phases"]["4"]["task_summary"]["status_counts"] == {"PROPOSED": 1}
+    # Untouched phase: task_summary present and empty, existing keys unaffected
+    assert loaded["phases"]["1"]["task_summary"]["status_counts"] == {}
+    assert loaded["phases"]["1"]["summary"] == "MISSING"
+
+
+def test_task_summary_does_not_disturb_existing_phase_keys(temp_db):
+    insights_service.save_insights("P", _sample_data(summary="Landscape summary"))
+    loaded = insights_service.load_current_insights("P")
+    phase = loaded["phases"]["1"]
+    assert phase["summary"] == "Landscape summary"
+    assert "task_summary" in phase
+    assert set(phase.keys()) >= {
+        "title", "summary", "confidence", "evidence_sources", "gaps",
+        "suggested_topics", "linked_files", "linked_file_ids", "task_summary",
+    }
