@@ -6,7 +6,11 @@ from db.migrate_runner import apply_migrations
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
+    # services.project_service.create_project() writes real directories
+    # relative to the process cwd -- chdir into the test's tmp_path so those
+    # filesystem side effects don't leak into the repo (see test_routes_chats.py).
+    monkeypatch.chdir(tmp_path)
     set_database_path(str(tmp_path / "test.db"))
     apply_migrations()
     flask_app = create_app()
