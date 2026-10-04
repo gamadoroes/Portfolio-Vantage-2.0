@@ -16,14 +16,15 @@ def _web_task_with_run(pid, title, run_id, response_id="resp_1", run_status="run
     return task_id
 
 
-def _openai_response(status, text=None, citation=None, error=None):
+def _openai_response(status, text=None, citation=None, error=None, citations=()):
     """Shaped like a real OpenAI Responses object (see test_deep_research_citations)."""
     content = []
     if text:
-        annotations = []
-        if citation:
-            title, url = citation
-            annotations = [SimpleNamespace(type="url_citation", start_index=0, end_index=0, title=title, url=url)]
+        all_citations = ([citation] if citation else []) + list(citations)
+        annotations = [
+            SimpleNamespace(type="url_citation", start_index=0, end_index=0, title=title, url=url)
+            for title, url in all_citations
+        ]
         content = [SimpleNamespace(type="output_text", text=text, annotations=annotations)]
     return SimpleNamespace(
         id="resp_1",
@@ -65,6 +66,44 @@ def test_sync_saves_finished_web_research_text_and_sources(temp_db, monkeypatch)
     # The supervisor scores evidence, so it must be able to see where claims came from.
     assert "Fee schedule" in run["output_text"]
     assert "https://example.com/fees" in run["output_text"]
+
+
+def test_sync_lists_a_page_cited_many_times_only_once(temp_db, monkeypatch):
+    # Real deep-research reports cite one page dozens of times with different
+    # "#:~:text=..." fragments (63 citations were only 12 pages), which would
+    # otherwise fill the supervisor's whole view of the report with a source list.
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    page = "https://online.example.edu/mba"
+    _serve(monkeypatch, {"resp_1": _openai_response("completed", "Body text.", citations=[
+        ("Online MBA", f"{page}#:~:text=Tuition%20is"),
+        ("Online MBA", f"{page}#:~:text=Duration%20is"),
+        ("Other page", "https://other.example.edu/fees"),
+    ])})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    saved = research_runs_repo.get("run_1")["output_text"]
+    assert saved.count(page) == 1
+    assert "#:~:text" not in saved
+    assert "https://other.example.edu/fees" in saved
+    assert "Sources (2)" in saved
+
+
+def test_sync_caps_a_very_long_source_list_but_says_how_many_were_left_out(temp_db, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _web_task_with_run(pid, "Fees", "run_1")
+    many = [(f"Page {i}", f"https://example.edu/page-{i}") for i in range(1, 26)]
+    _serve(monkeypatch, {"resp_1": _openai_response("completed", "Body text.", citations=many)})
+
+    supervisor_service.sync_web_research_runs("P")
+
+    saved = research_runs_repo.get("run_1")["output_text"]
+    assert "Sources (25)" in saved
+    assert "https://example.edu/page-20" in saved
+    assert "https://example.edu/page-21" not in saved
+    assert "(+5 more)" in saved
+    assert "Body text." in saved  # the report itself is still there after the list
 
 
 def test_sync_fills_in_text_for_a_run_the_browser_already_marked_completed(temp_db, monkeypatch):

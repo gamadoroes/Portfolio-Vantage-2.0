@@ -22,6 +22,7 @@ MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
 MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
 MAX_RUN_OUTPUT_REVIEW_CHARS = 8000
 MAX_REVIEW_OUTPUT_TOTAL_CHARS = 24000
+MAX_WEB_SOURCES_LISTED = 20
 
 
 def _clip_run_output(text, limit):
@@ -567,15 +568,25 @@ def _web_research_error(response):
 
 
 def _format_web_research_output(text, citations):
-    # Sources go first: build_context clips from the end, and the supervisor needs
-    # them to judge how well-evidenced the findings are.
-    lines = [
-        f"[{c['index']}] {c['title']} - {c['url']}" if c["type"] == "url" else f"[{c['index']}] {c['filename']}"
-        for c in citations
-    ]
-    if not lines:
+    # Sources go first, because build_context clips from the end and the supervisor needs
+    # them to judge how well-evidenced the findings are. Real reports cite one page dozens
+    # of times with different "#:~:text=" fragments, so list each page once and cap the
+    # list; otherwise it would fill the supervisor's whole view of the report.
+    sources = {}
+    for c in citations:
+        if c["type"] == "url":
+            page = c["url"].split("#")[0]
+            sources.setdefault(page, f"{c['title']} - {page}")
+        else:
+            sources.setdefault(c["filename"], c["filename"])
+    if not sources:
         return text
-    return "Sources:\n" + "\n".join(lines) + "\n\n" + text
+
+    listed = list(sources.values())[:MAX_WEB_SOURCES_LISTED]
+    lines = [f"- {source}" for source in listed]
+    if len(sources) > len(listed):
+        lines.append(f"(+{len(sources) - len(listed)} more)")
+    return f"Sources ({len(sources)}):\n" + "\n".join(lines) + "\n\n" + text
 
 
 def sync_web_research_runs(project_name):
