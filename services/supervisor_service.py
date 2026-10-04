@@ -2,6 +2,9 @@
 import json
 from datetime import datetime
 
+import anthropic
+from flask import current_app
+
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 
 from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
@@ -461,3 +464,58 @@ def handle_trigger_synthesis(project_name, tool_input):
 
 
 TOOL_HANDLERS["trigger_synthesis"] = handle_trigger_synthesis
+
+
+SUPERVISOR_SYSTEM_PROMPT = (
+    "You are the research supervisor for a competitive-intelligence project "
+    "in Australian higher education. You coordinate research across 7 fixed "
+    "phases by managing a set of research tasks, each with its own status "
+    "lifecycle. On every call, you must choose exactly ONE of the provided "
+    "tools based on the current project state below. Prefer making forward "
+    "progress: propose tasks for phases with no work yet, mark proposed "
+    "tasks ready once their dependencies are satisfied, dispatch tasks that "
+    "are READY, review tasks whose research has finished, and request human "
+    "review or create follow-up tasks when evidence is weak. Only trigger "
+    "final synthesis once every phase has real completed research."
+)
+
+
+def run_supervisor_cycle(project_name):
+    project_id = projects_repo.get_or_create_id(project_name)
+    context_text = build_context(project_name)
+
+    client = anthropic.Anthropic(api_key=current_app.config["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model=current_app.config["ANTHROPIC_MODEL"],
+        max_tokens=2000,
+        system=SUPERVISOR_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": context_text}],
+        tools=TOOL_SCHEMAS,
+        tool_choice={"type": "any"},
+    )
+
+    tool_use_block = next((b for b in response.content if b.type == "tool_use"), None)
+    if tool_use_block is None:
+        raise RuntimeError("Supervisor model did not return a tool call.")
+
+    tool_name = tool_use_block.name
+    tool_input = tool_use_block.input
+    handler = TOOL_HANDLERS[tool_name]
+
+    try:
+        result = handler(project_name, tool_input)
+        execution_result = {"success": True, "result": result}
+    except ValueError as exc:
+        execution_result = {"success": False, "error": str(exc)}
+
+    agent_decisions_repo.record(
+        project_id,
+        decision_type=tool_name,
+        detail=json.dumps({"input": tool_input, "execution": execution_result}),
+        research_work_item_id=tool_input.get("task_id"),
+    )
+
+    return {
+        "decision": {"action": tool_name, "input": tool_input},
+        "execution": execution_result,
+    }

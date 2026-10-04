@@ -1,6 +1,6 @@
 import pytest
 
-from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
+from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 from services import insights_service, project_service, research_task_service, supervisor_service
 
 
@@ -405,3 +405,128 @@ def test_handle_trigger_synthesis_succeeds_when_all_six_phases_complete(temp_db,
     from services import insights_service
     current = insights_service.load_current_insights("P")
     assert current["phases"]["7"]["summary"] == "## Strategic Options\n\nDo X, then Y."
+
+
+def test_tool_handlers_keys_match_tool_schemas_names():
+    # Guards against a typo'd TOOL_HANDLERS key (e.g. "propose_task" instead
+    # of "propose_tasks") that would otherwise surface only as a KeyError at
+    # runtime in run_supervisor_cycle, long after the handler itself was
+    # written and tested in isolation.
+    schema_names = {schema["name"] for schema in supervisor_service.TOOL_SCHEMAS}
+    assert set(supervisor_service.TOOL_HANDLERS.keys()) == schema_names
+
+
+class _FakeToolUseBlock:
+    def __init__(self, name, input):
+        self.type = "tool_use"
+        self.name = name
+        self.input = input
+
+
+class _FakeTextBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _FakeAnthropicResponse:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeMessages:
+    def __init__(self, response):
+        self._response = response
+
+    def create(self, **kwargs):
+        return self._response
+
+
+class _FakeAnthropicClient:
+    def __init__(self, response):
+        self.messages = _FakeMessages(response)
+
+
+def _patch_anthropic(monkeypatch, tool_name, tool_input, preceding_text=None):
+    content = []
+    if preceding_text:
+        content.append(_FakeTextBlock(preceding_text))
+    content.append(_FakeToolUseBlock(tool_name, tool_input))
+    response = _FakeAnthropicResponse(content)
+    monkeypatch.setattr(
+        supervisor_service.anthropic, "Anthropic",
+        lambda api_key: _FakeAnthropicClient(response),
+    )
+
+
+@pytest.fixture
+def app_context():
+    from app import create_app
+    flask_app = create_app()
+    with flask_app.app_context():
+        yield
+
+
+def test_run_supervisor_cycle_executes_and_records_decision(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    _patch_anthropic(monkeypatch, "mark_ready", {"task_id": task_id, "reason": "ready to go"})
+
+    result = supervisor_service.run_supervisor_cycle("P")
+
+    assert result["decision"]["action"] == "mark_ready"
+    assert result["execution"]["success"] is True
+    assert research_work_items_repo.get(task_id)["status"] == "READY"
+
+    decisions = agent_decisions_repo.list_for_project(pid)
+    assert len(decisions) == 1
+    assert decisions[0]["decision_type"] == "mark_ready"
+    assert decisions[0]["research_work_item_id"] == task_id
+
+
+def test_run_supervisor_cycle_records_failed_decision_without_crashing(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(task_id, status="COMPLETE")
+    _patch_anthropic(monkeypatch, "mark_ready", {"task_id": task_id, "reason": "trying anyway"})
+
+    result = supervisor_service.run_supervisor_cycle("P")
+
+    assert result["execution"]["success"] is False
+    assert "error" in result["execution"]
+    decisions = agent_decisions_repo.list_for_project(pid)
+    assert len(decisions) == 1  # still recorded, even though execution failed
+
+
+def test_run_supervisor_cycle_propagates_cycle_rejection_as_failed_decision(temp_db, app_context, monkeypatch):
+    # Same mutual-dependency construction as Task 5's handler-level cycle
+    # test, but driven end-to-end through run_supervisor_cycle: the (faked)
+    # model proposes two tasks in one batch that depend on each other via
+    # batch indices, which is a genuine cycle once both edges are wired.
+    projects_repo.get_or_create_id("P")
+    _patch_anthropic(monkeypatch, "propose_tasks", {
+        "tasks": [
+            {"phase_key": "4", "title": "X", "depends_on_batch_indices": [1]},
+            {"phase_key": "4", "title": "Y", "depends_on_batch_indices": [0]},
+        ],
+        "reason": "mutually dependent tasks",
+    })
+
+    result = supervisor_service.run_supervisor_cycle("P")
+
+    assert result["execution"]["success"] is False
+    assert "cycle" in result["execution"]["error"].lower()
+    decisions = agent_decisions_repo.list_for_project(projects_repo.get_or_create_id("P"))
+    assert len(decisions) == 1
+    assert decisions[0]["decision_type"] == "propose_tasks"
+
+
+def test_run_supervisor_cycle_no_tool_use_block_raises(temp_db, app_context, monkeypatch):
+    projects_repo.get_or_create_id("P")
+    response = _FakeAnthropicResponse([_FakeTextBlock("I don't know what to do.")])
+    monkeypatch.setattr(
+        supervisor_service.anthropic, "Anthropic",
+        lambda api_key: _FakeAnthropicClient(response),
+    )
+    with pytest.raises(RuntimeError):
+        supervisor_service.run_supervisor_cycle("P")
