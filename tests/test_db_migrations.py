@@ -24,7 +24,20 @@ def test_apply_migrations_is_idempotent(temp_db):
     apply_migrations()
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
-    assert count == 3
+    assert count == 4
+
+
+def test_agent_decisions_and_research_runs_schema(temp_db):
+    with get_connection() as conn:
+        decision_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(agent_decisions)").fetchall()
+        }
+        assert "research_work_item_id" in decision_columns
+
+        run_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(research_runs)").fetchall()
+        }
+        assert "output_text" in run_columns
 
 
 def test_research_work_items_schema(temp_db):
