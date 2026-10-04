@@ -368,3 +368,40 @@ def test_handle_review_outcome_failed_skips_reviewing(temp_db):
     # No exception was raised getting here -- confirms RUNNING->FAILED was taken
     # directly, since RUNNING->REVIEWING->FAILED is illegal per Phase 2's table
     # (REVIEWING has no FAILED edge) and would have raised ValueError instead.
+
+
+def _complete_task_for_phase(pid, phase_key):
+    task_id = research_work_items_repo.create(pid, phase_key, f"Task for phase {phase_key}")
+    research_work_items_repo.update_fields(task_id, status="COMPLETE")
+    return task_id
+
+
+def test_handle_trigger_synthesis_rejects_when_one_phase_missing(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    # Phases 1-5 have a COMPLETE task; phase 6 does not.
+    for phase_key in ["1", "2", "3", "4", "5"]:
+        _complete_task_for_phase(pid, phase_key)
+
+    with pytest.raises(ValueError, match="6"):
+        supervisor_service.handle_trigger_synthesis("P", {"reason": "think we're done"})
+
+
+def test_handle_trigger_synthesis_succeeds_when_all_six_phases_complete(temp_db, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from services import project_service
+    project_service.create_project("P")
+    pid = projects_repo.get_or_create_id("P")
+    for phase_key in ["1", "2", "3", "4", "5", "6"]:
+        _complete_task_for_phase(pid, phase_key)
+
+    monkeypatch.setattr(
+        supervisor_service.llm_service, "prompt_completion",
+        lambda system_prompt, user_message, max_tokens=4000: "## Strategic Options\n\nDo X, then Y.",
+    )
+
+    result = supervisor_service.handle_trigger_synthesis("P", {"reason": "all phases complete"})
+    assert result["synthesis_generated"] is True
+
+    from services import insights_service
+    current = insights_service.load_current_insights("P")
+    assert current["phases"]["7"]["summary"] == "## Strategic Options\n\nDo X, then Y."

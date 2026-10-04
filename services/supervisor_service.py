@@ -408,3 +408,56 @@ def handle_review_outcome(project_name, tool_input):
 
 
 TOOL_HANDLERS["review_outcome"] = handle_review_outcome
+
+
+SYNTHESIS_SYSTEM_PROMPT = (
+    "You are a senior strategy consultant synthesising a competitive "
+    "landscape analysis for Australian higher education. Using ONLY the "
+    "phase summaries provided, identify the key strategic options available. "
+    "Use the SO WHAT / NOW WHAT framework. Write in Australian English."
+)
+
+
+def handle_trigger_synthesis(project_name, tool_input):
+    project_id = projects_repo.get_or_create_id(project_name)
+    missing_phases = []
+    for phase_key in PHASE_DEFINITIONS:
+        if phase_key == "7":
+            continue
+        items = research_work_items_repo.list_for_phase(project_id, phase_key)
+        if not any(item["status"] == "COMPLETE" for item in items):
+            missing_phases.append(phase_key)
+    if missing_phases:
+        raise ValueError(f"Phases missing completed research: {', '.join(missing_phases)}")
+
+    current = insights_service.load_current_insights(project_name)
+    phase_summaries = []
+    for phase_key in PHASE_DEFINITIONS:
+        if phase_key == "7":
+            continue
+        phase = current["phases"].get(phase_key, {})
+        summary = phase.get("summary", "MISSING")
+        if summary and summary != "MISSING":
+            title = PHASE_DEFINITIONS[phase_key]["title"]
+            phase_summaries.append(f"## {title}\n\n{summary}")
+
+    user_message = "\n\n".join(phase_summaries) if phase_summaries else "(no phase summaries available)"
+    synthesis_text = llm_service.prompt_completion(SYNTHESIS_SYSTEM_PROMPT, user_message, max_tokens=4000)
+
+    updated_phases = dict(current["phases"])
+    phase_7 = dict(updated_phases.get("7", {}))
+    phase_7["summary"] = synthesis_text
+    phase_7["confidence"] = "medium"
+    updated_phases["7"] = phase_7
+
+    insights_service.save_insights(project_name, {
+        "generated_at": datetime.now().isoformat(),
+        "competitors": current.get("competitors", []),
+        "competitor_landscape_markdown": current.get("competitor_landscape_markdown", ""),
+        "phases": updated_phases,
+    })
+
+    return {"synthesis_generated": True}
+
+
+TOOL_HANDLERS["trigger_synthesis"] = handle_trigger_synthesis
