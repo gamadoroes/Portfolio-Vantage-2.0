@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from db.repositories import projects_repo, research_runs_repo
+from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
 
 
 def test_create_and_get(temp_db):
@@ -54,12 +54,13 @@ def test_find_recent_duplicate_ignores_completed_runs(temp_db):
 
 def test_find_latest_for_work_item(temp_db):
     pid = projects_repo.get_or_create_id("P")
+    work_item_id = research_work_items_repo.create(pid, "4", "Task")
     research_runs_repo.create("run_1", pid, None, None, "first")
-    research_runs_repo.update("run_1", research_work_item_id=5)
+    research_runs_repo.update("run_1", research_work_item_id=work_item_id)
     research_runs_repo.create("run_2", pid, None, None, "second")
-    research_runs_repo.update("run_2", research_work_item_id=5)
+    research_runs_repo.update("run_2", research_work_item_id=work_item_id)
 
-    latest = research_runs_repo.find_latest_for_work_item(5)
+    latest = research_runs_repo.find_latest_for_work_item(work_item_id)
     assert latest["id"] == "run_2"
 
 
@@ -69,10 +70,12 @@ def test_find_latest_for_work_item_none_when_no_runs(temp_db):
 
 def test_find_latest_for_work_item_scoped_to_correct_item(temp_db):
     pid = projects_repo.get_or_create_id("P")
+    item_1 = research_work_items_repo.create(pid, "4", "Task 1")
+    item_2 = research_work_items_repo.create(pid, "4", "Task 2")
     research_runs_repo.create("run_a", pid, None, None, "for item 1")
-    research_runs_repo.update("run_a", research_work_item_id=1)
+    research_runs_repo.update("run_a", research_work_item_id=item_1)
     research_runs_repo.create("run_b", pid, None, None, "for item 2")
-    research_runs_repo.update("run_b", research_work_item_id=2)
+    research_runs_repo.update("run_b", research_work_item_id=item_2)
 
-    assert research_runs_repo.find_latest_for_work_item(1)["id"] == "run_a"
-    assert research_runs_repo.find_latest_for_work_item(2)["id"] == "run_b"
+    assert research_runs_repo.find_latest_for_work_item(item_1)["id"] == "run_a"
+    assert research_runs_repo.find_latest_for_work_item(item_2)["id"] == "run_b"

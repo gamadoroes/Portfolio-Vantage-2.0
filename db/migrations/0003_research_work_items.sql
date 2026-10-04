@@ -37,5 +37,5 @@ CREATE TABLE research_work_item_dependencies (
     PRIMARY KEY (work_item_id, depends_on_work_item_id)
 );
 
-ALTER TABLE research_runs ADD COLUMN research_work_item_id INTEGER;
-ALTER TABLE artefacts ADD COLUMN research_work_item_id INTEGER;
+ALTER TABLE research_runs ADD COLUMN research_work_item_id INTEGER REFERENCES research_work_items(id);
+ALTER TABLE artefacts ADD COLUMN research_work_item_id INTEGER REFERENCES research_work_items(id);

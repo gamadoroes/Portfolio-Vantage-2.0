@@ -1,4 +1,4 @@
-from db.repositories import agent_decisions_repo, projects_repo
+from db.repositories import agent_decisions_repo, projects_repo, research_work_items_repo
 
 
 def test_record_without_work_item_id(temp_db):
@@ -9,8 +9,9 @@ def test_record_without_work_item_id(temp_db):
 
 def test_record_with_work_item_id(temp_db):
     pid = projects_repo.get_or_create_id("P")
+    work_item_id = research_work_items_repo.create(pid, "4", "Task")
     decision_id = agent_decisions_repo.record(
-        pid, "SKIP_TASK", '{"task_id": 7}', research_work_item_id=7
+        pid, "SKIP_TASK", '{"task_id": 7}', research_work_item_id=work_item_id
     )
     assert isinstance(decision_id, int)
 

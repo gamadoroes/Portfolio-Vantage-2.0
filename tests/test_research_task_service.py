@@ -253,3 +253,15 @@ def test_flag_for_human_review_sets_flag(temp_db):
     research_task_service.flag_for_human_review(task_id)
     row = research_work_items_repo.get(task_id)
     assert row["human_review_required"] == 1
+
+
+def test_set_review_scores_with_multiple_fields(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_task_service.set_review_scores(
+        task_id, completeness_score=0.85, evidence_score=0.9, identified_gaps=["Gap 1", "Gap 2"]
+    )
+    row = research_work_items_repo.get(task_id)
+    assert row["completeness_score"] == 0.85
+    assert row["evidence_score"] == 0.9
+    assert row["identified_gaps_json"] == '["Gap 1", "Gap 2"]'
