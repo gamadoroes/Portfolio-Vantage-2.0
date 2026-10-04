@@ -350,6 +350,37 @@ def test_handle_create_followup_task_raises_for_unknown_task(temp_db):
         })
 
 
+def test_handle_create_followup_task_works_after_review_outcome_already_marked_follow_up(temp_db):
+    # The supervisor's own sequence: review_outcome(FOLLOW_UP_REQUIRED) moves the
+    # task straight to FOLLOW_UP_REQUIRED, and the next cycle then asks for the
+    # follow-up task. Nothing in that flow ever leaves a task in REVIEWING.
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="completed")
+    supervisor_service.handle_review_outcome("P", {
+        "task_id": task_id, "outcome": "FOLLOW_UP_REQUIRED", "reason": "weak evidence",
+    })
+
+    result = supervisor_service.handle_create_followup_task("P", {
+        "task_id": task_id, "followup_title": "Find an authoritative source", "reason": "close the gap",
+    })
+
+    assert research_work_items_repo.get(task_id)["status"] == "FOLLOW_UP_REQUIRED"
+    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(task_id)]
+    assert deps == [result["followup_task_id"]]
+
+
+def test_handle_create_followup_task_refuses_a_task_that_was_never_reviewed(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _dispatched_task_with_run(pid, status="completed")  # RUNNING, not yet reviewed
+
+    with pytest.raises(ValueError):
+        supervisor_service.handle_create_followup_task("P", {
+            "task_id": task_id, "followup_title": "Premature follow-up", "reason": "x",
+        })
+
+    assert [row["id"] for row in research_work_items_repo.list_for_project(pid)] == [task_id]
+
+
 def test_handle_dispatch_task_file_analysis_completes_synchronously(temp_db, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from services import project_service
@@ -409,6 +440,74 @@ def test_handle_dispatch_task_raises_for_unknown_task(temp_db):
         supervisor_service.handle_dispatch_task("P", {
             "task_id": 9999, "research_method": "FILE_ANALYSIS", "reason": "x",
         })
+
+
+def _ready_task_in_real_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from services import project_service
+    project_service.create_project("P")
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
+    research_work_items_repo.update_fields(task_id, status="READY")
+    return task_id
+
+
+def _assert_dispatch_failure_left_nothing_stranded(task_id, message):
+    assert research_work_items_repo.get(task_id)["status"] == "FAILED"
+    run = research_runs_repo.find_latest_for_work_item(task_id)
+    assert run["status"] == "failed"
+    assert message in run["error"]
+
+
+def test_handle_dispatch_task_targeted_web_start_failure_fails_the_task_and_run(temp_db, tmp_path, monkeypatch):
+    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
+
+    def outage(prompt):
+        raise RuntimeError("OpenAI is down")
+
+    monkeypatch.setattr(supervisor_service.openai_service, "start_deep_research", outage)
+
+    # A ValueError (not the raw RuntimeError) is what lets run_supervisor_cycle
+    # record the failure as a decision instead of dropping it.
+    with pytest.raises(ValueError, match="OpenAI is down"):
+        supervisor_service.handle_dispatch_task("P", {
+            "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "needs live web data",
+        })
+
+    _assert_dispatch_failure_left_nothing_stranded(task_id, "OpenAI is down")
+
+
+def test_handle_dispatch_task_file_analysis_failure_fails_the_task_and_run(temp_db, tmp_path, monkeypatch):
+    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
+
+    def outage(system_prompt, user_message, max_tokens=3000):
+        raise RuntimeError("Anthropic is down")
+
+    monkeypatch.setattr(supervisor_service.llm_service, "prompt_completion", outage)
+
+    with pytest.raises(ValueError, match="Anthropic is down"):
+        supervisor_service.handle_dispatch_task("P", {
+            "task_id": task_id, "research_method": "FILE_ANALYSIS", "reason": "files are available",
+        })
+
+    _assert_dispatch_failure_left_nothing_stranded(task_id, "Anthropic is down")
+
+
+def test_handle_dispatch_task_does_not_start_research_for_a_task_that_is_not_ready(temp_db, tmp_path, monkeypatch):
+    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
+    research_work_items_repo.update_fields(task_id, status="PROPOSED")
+    started = []
+    monkeypatch.setattr(
+        supervisor_service.openai_service, "start_deep_research", lambda prompt: started.append(prompt),
+    )
+
+    with pytest.raises(ValueError):
+        supervisor_service.handle_dispatch_task("P", {
+            "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "x",
+        })
+
+    assert started == []  # a billed research run must never start for a task that failed validation
+    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"
 
 
 def _dispatched_task_with_run(pid, status="completed"):

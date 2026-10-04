@@ -203,7 +203,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "create_followup_task",
-        "description": "Mark a task as needing follow-up research and create a new dependent task to fill the gap. The original task will become eligible for READY again once the new follow-up task completes or is skipped.",
+        "description": "Create a new task that fills a gap in a task needing follow-up research, and make the original task depend on it. Call this for a task that review_outcome has already marked FOLLOW_UP_REQUIRED (a task still in REVIEWING is marked for you). The original task will become eligible for READY again once the new follow-up task completes or is skipped.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -340,7 +340,10 @@ def handle_create_followup_task(project_name, tool_input):
     if original is None:
         raise ValueError(f"No such research task: {original_id}")
 
-    research_task_service.transition_task(original_id, "FOLLOW_UP_REQUIRED")
+    # review_outcome(FOLLOW_UP_REQUIRED) has normally put the task here already; only a
+    # task still in REVIEWING needs the transition (anything else is refused by it).
+    if original["status"] != "FOLLOW_UP_REQUIRED":
+        research_task_service.transition_task(original_id, "FOLLOW_UP_REQUIRED")
     new_id = research_task_service.create_task(
         project_id,
         original["phase_key"],
@@ -415,20 +418,28 @@ def handle_dispatch_task(project_name, tool_input):
     run_id = research_run_service.create_run(project_name, None, None, prompt_preview)
     research_run_service.update_run(project_name, run_id, research_work_item_id=task_id)
 
-    if method == "FILE_ANALYSIS":
-        files = _selected_project_files(project_name)
-        system_prompt, user_message = _build_file_analysis_prompt(task_row, files)
-        output_text = llm_service.prompt_completion(system_prompt, user_message, max_tokens=3000)
-        research_run_service.update_run(
-            project_name, run_id, status="completed", output_text=output_text,
-            completed_at=datetime.now().isoformat(),
-        )
-        return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "completed"}
+    try:
+        if method == "FILE_ANALYSIS":
+            files = _selected_project_files(project_name)
+            system_prompt, user_message = _build_file_analysis_prompt(task_row, files)
+            output_text = llm_service.prompt_completion(system_prompt, user_message, max_tokens=3000)
+            research_run_service.update_run(
+                project_name, run_id, status="completed", output_text=output_text,
+                completed_at=datetime.now().isoformat(),
+            )
+            return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "completed"}
 
-    # TARGETED_WEB
-    response = openai_service.start_deep_research(prompt_preview)
-    research_run_service.update_run(project_name, run_id, response_id=response.id)
-    return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "running"}
+        # TARGETED_WEB
+        response = openai_service.start_deep_research(prompt_preview)
+        research_run_service.update_run(project_name, run_id, response_id=response.id)
+        return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "running"}
+    except Exception as exc:
+        # The task is already RUNNING and the run row exists. Left alone they would be
+        # stranded (nothing to poll, review_outcome refuses a "running" run), and a
+        # non-ValueError would also bypass the decision log in run_supervisor_cycle.
+        research_run_service.fail_run(project_name, run_id, str(exc))
+        research_task_service.transition_task(task_id, "FAILED")
+        raise ValueError(f"Could not run {method} for task {task_id}: {exc}") from exc
 
 
 TOOL_HANDLERS["dispatch_task"] = handle_dispatch_task
