@@ -199,6 +199,15 @@ def test_handle_propose_tasks_cycle_raises_value_error(temp_db):
         })
 
 
+def test_handle_propose_tasks_out_of_range_batch_index_raises_value_error(temp_db):
+    projects_repo.get_or_create_id("P")
+    with pytest.raises(ValueError):
+        supervisor_service.handle_propose_tasks("P", {
+            "tasks": [{"phase_key": "4", "title": "X", "depends_on_batch_indices": [5]}],
+            "reason": "bad index",
+        })
+
+
 def test_handle_create_followup_task_marks_original_and_creates_dependency(temp_db):
     pid = projects_repo.get_or_create_id("P")
     original_id = research_work_items_repo.create(pid, "4", "Product / Torrens")

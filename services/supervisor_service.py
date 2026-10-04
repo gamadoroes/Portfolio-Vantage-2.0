@@ -264,6 +264,11 @@ def handle_propose_tasks(project_name, tool_input):
         for dep_id in t.get("depends_on_existing_ids") or []:
             research_task_service.add_dependency(task_id, dep_id)
         for dep_index in t.get("depends_on_batch_indices") or []:
+            if not isinstance(dep_index, int) or dep_index < 0 or dep_index >= len(tasks_input):
+                raise ValueError(
+                    f"depends_on_batch_indices value {dep_index!r} is out of range "
+                    f"for a batch of {len(tasks_input)} tasks"
+                )
             research_task_service.add_dependency(task_id, new_ids[dep_index])
 
     return {"created_task_ids": new_ids}
