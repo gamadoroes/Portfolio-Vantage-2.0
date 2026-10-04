@@ -1,7 +1,7 @@
 # services/supervisor_service.py
 from db.repositories import agent_decisions_repo, projects_repo, research_work_items_repo
 
-from . import insights_service
+from . import insights_service, research_task_service
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
 
@@ -70,3 +70,174 @@ def build_context(project_name):
         text = text[:MAX_CONTEXT_CHARS] + "\n\n[...context truncated for length...]"
 
     return text
+
+
+TOOL_SCHEMAS = [
+    {
+        "name": "propose_tasks",
+        "description": "Create one or more new research tasks. Use this for the initial research plan, or to fill a gap identified later. Supports dependencies on existing tasks (by their real id) and on other tasks proposed in this same call (by their zero-based index in the tasks array).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "phase_key": {"type": "string", "description": "One of '1' through '7', matching the fixed phase definitions."},
+                            "title": {"type": "string"},
+                            "objective": {"type": "string"},
+                            "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                            "entities": {"type": "array", "items": {"type": "string"}},
+                            "expected_output": {"type": "string"},
+                            "depends_on_existing_ids": {"type": "array", "items": {"type": "integer"}},
+                            "depends_on_batch_indices": {"type": "array", "items": {"type": "integer"}, "description": "Zero-based indices into this same tasks array."},
+                        },
+                        "required": ["phase_key", "title"],
+                    },
+                },
+                "reason": {"type": "string", "description": "Why these tasks are needed now."},
+            },
+            "required": ["tasks", "reason"],
+        },
+    },
+    {
+        "name": "mark_ready",
+        "description": "Transition a PROPOSED or FOLLOW_UP_REQUIRED task to READY, making it eligible for dispatch. Only legal if all of its dependencies are COMPLETE or SKIPPED -- the backend re-checks this regardless of what you believe.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    },
+    {
+        "name": "dispatch_task",
+        "description": "Transition a READY task to RUNNING and start the chosen research method. FILE_ANALYSIS runs synchronously against the project's uploaded source files and completes before this call returns. TARGETED_WEB starts an async web-research job -- its outcome is reviewed on a LATER supervisor call via review_outcome, not this one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "research_method": {"type": "string", "enum": ["FILE_ANALYSIS", "TARGETED_WEB"]},
+                "reason": {"type": "string", "description": "Why this method was chosen over the other."},
+            },
+            "required": ["task_id", "research_method", "reason"],
+        },
+    },
+    {
+        "name": "review_outcome",
+        "description": "Review a RUNNING task whose research has finished (its linked run has status completed or failed) and record the outcome. Do not call this for a task whose run is still in progress.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "completeness_score": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence_score": {"type": "number", "minimum": 0, "maximum": 1},
+                "identified_gaps": {"type": "array", "items": {"type": "string"}},
+                "outcome": {"type": "string", "enum": ["COMPLETE", "FOLLOW_UP_REQUIRED", "FAILED"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "outcome", "reason"],
+        },
+    },
+    {
+        "name": "create_followup_task",
+        "description": "Mark a task as needing follow-up research and create a new dependent task to fill the gap. The original task will become eligible for READY again once the new follow-up task completes or is skipped.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "The task that needs follow-up."},
+                "followup_title": {"type": "string"},
+                "followup_objective": {"type": "string"},
+                "research_method": {"type": "string", "enum": ["FILE_ANALYSIS", "TARGETED_WEB"]},
+                "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "followup_title", "reason"],
+        },
+    },
+    {
+        "name": "request_human_review",
+        "description": "Flag a task as requiring human judgment before it can be marked complete.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    },
+    {
+        "name": "skip_task",
+        "description": "Abandon a task permanently. Use when it's no longer useful to pursue.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    },
+    {
+        "name": "trigger_synthesis",
+        "description": "Request final Phase 7 (Options for OES) synthesis across all prior phases. Only call this when you believe every phase has sufficient completed research. The backend will verify this independently and reject the request if prerequisites are not actually met.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"},
+            },
+            "required": ["reason"],
+        },
+    },
+    {
+        "name": "no_action",
+        "description": "Nothing useful can be done right now (e.g. all eligible tasks are already running, or everything is blocked on an async result). Use this instead of forcing an action that doesn't make sense.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"},
+            },
+            "required": ["reason"],
+        },
+    },
+]
+
+
+def handle_mark_ready(project_name, tool_input):
+    task_id = tool_input["task_id"]
+    research_task_service.transition_task(task_id, "READY")
+    return {"task_id": task_id, "new_status": "READY"}
+
+
+def handle_skip_task(project_name, tool_input):
+    task_id = tool_input["task_id"]
+    research_task_service.transition_task(task_id, "SKIPPED")
+    return {"task_id": task_id, "new_status": "SKIPPED"}
+
+
+def handle_no_action(project_name, tool_input):
+    return {"message": "No action taken."}
+
+
+def handle_request_human_review(project_name, tool_input):
+    task_id = tool_input["task_id"]
+    item = research_work_items_repo.get(task_id)
+    if item is None:
+        raise ValueError(f"No such research task: {task_id}")
+    research_task_service.flag_for_human_review(task_id)
+    if item["status"] == "REVIEWING":
+        research_task_service.transition_task(task_id, "WAITING_FOR_HUMAN")
+        return {"task_id": task_id, "new_status": "WAITING_FOR_HUMAN"}
+    return {"task_id": task_id, "new_status": item["status"], "flagged_only": True}
+
+
+TOOL_HANDLERS = {
+    "mark_ready": handle_mark_ready,
+    "skip_task": handle_skip_task,
+    "no_action": handle_no_action,
+    "request_human_review": handle_request_human_review,
+}

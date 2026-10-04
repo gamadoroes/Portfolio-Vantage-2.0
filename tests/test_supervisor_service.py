@@ -1,5 +1,7 @@
+import pytest
+
 from db.repositories import projects_repo, research_work_items_repo
-from services import insights_service, project_service, supervisor_service
+from services import insights_service, project_service, research_task_service, supervisor_service
 
 
 def test_build_context_includes_objective(temp_db):
@@ -71,3 +73,70 @@ def test_build_context_does_not_leak_other_projects(temp_db):
 
     assert "P2-only task" in context2
     assert "P1-only task" not in context2
+
+
+def test_tool_schemas_has_nine_tools_with_correct_names():
+    names = {schema["name"] for schema in supervisor_service.TOOL_SCHEMAS}
+    assert names == {
+        "propose_tasks", "mark_ready", "dispatch_task", "review_outcome",
+        "create_followup_task", "request_human_review", "skip_task",
+        "trigger_synthesis", "no_action",
+    }
+
+
+def test_handle_mark_ready_transitions_to_ready(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    result = supervisor_service.handle_mark_ready("P", {"task_id": task_id, "reason": "deps satisfied"})
+    assert result["new_status"] == "READY"
+    assert research_work_items_repo.get(task_id)["status"] == "READY"
+
+
+def test_handle_mark_ready_raises_on_illegal_transition(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(task_id, status="COMPLETE")
+    with pytest.raises(ValueError):
+        supervisor_service.handle_mark_ready("P", {"task_id": task_id, "reason": "x"})
+
+
+def test_handle_skip_task_transitions_to_skipped(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    result = supervisor_service.handle_skip_task("P", {"task_id": task_id, "reason": "no longer useful"})
+    assert result["new_status"] == "SKIPPED"
+    assert research_work_items_repo.get(task_id)["status"] == "SKIPPED"
+
+
+def test_handle_no_action_is_a_noop(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    result = supervisor_service.handle_no_action("P", {"reason": "nothing ready"})
+    assert "message" in result
+    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"  # untouched
+
+
+def test_handle_request_human_review_sets_flag_only_when_not_reviewing(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")  # status PROPOSED
+    result = supervisor_service.handle_request_human_review("P", {"task_id": task_id, "reason": "uncertain"})
+    row = research_work_items_repo.get(task_id)
+    assert row["human_review_required"] == 1
+    assert row["status"] == "PROPOSED"  # unchanged, since it wasn't REVIEWING
+    assert result["flagged_only"] is True
+
+
+def test_handle_request_human_review_transitions_when_reviewing(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(task_id, status="REVIEWING")
+    result = supervisor_service.handle_request_human_review("P", {"task_id": task_id, "reason": "uncertain"})
+    row = research_work_items_repo.get(task_id)
+    assert row["human_review_required"] == 1
+    assert row["status"] == "WAITING_FOR_HUMAN"
+    assert result["new_status"] == "WAITING_FOR_HUMAN"
+
+
+def test_handle_request_human_review_raises_for_unknown_task(temp_db):
+    with pytest.raises(ValueError):
+        supervisor_service.handle_request_human_review("P", {"task_id": 9999, "reason": "x"})
