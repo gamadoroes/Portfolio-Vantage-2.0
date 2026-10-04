@@ -1,11 +1,18 @@
 # services/supervisor_service.py
+import json
+from datetime import datetime
+
 from db.repositories import agent_decisions_repo, projects_repo, research_work_items_repo
 
-from . import insights_service, research_task_service
+from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
+from .file_index_service import HIDDEN_SOURCE_FILES, reconcile_file_index, reconcile_selected_file_ids
+from .file_service import load_project_files
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
 
 MAX_CONTEXT_CHARS = 60000
+MAX_FILE_ANALYSIS_TOTAL_CHARS = 60000
+MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
 
 
 def _format_work_item(item, dependencies):
@@ -297,3 +304,79 @@ def handle_create_followup_task(project_name, tool_input):
 
 TOOL_HANDLERS["propose_tasks"] = handle_propose_tasks
 TOOL_HANDLERS["create_followup_task"] = handle_create_followup_task
+
+
+def _selected_project_files(project_name):
+    all_files = {
+        k: v for k, v in load_project_files(project_name).items()
+        if k not in HIDDEN_SOURCE_FILES
+    }
+    index_entries = reconcile_file_index(project_name)
+    selection_state = reconcile_selected_file_ids(project_name, index_entries)
+    selected_files = selection_state.get("selected_files", [])
+    if selected_files:
+        return {k: v for k, v in all_files.items() if k in set(selected_files)}
+    return all_files
+
+
+def _build_file_analysis_prompt(task_row, files):
+    objective = task_row["objective"] or task_row["title"]
+    entities = json.loads(task_row["entities_json"]) if task_row["entities_json"] else []
+    expected_output = task_row["expected_output"] or "a clear, evidence-based answer"
+    entities_line = f"\nEntities of interest: {', '.join(entities)}" if entities else ""
+
+    system_prompt = (
+        "You are a research analyst for an Australian higher-education competitive "
+        "analysis project. Use ONLY the provided source files. If the objective "
+        "cannot be answered from them, say MISSING -- do not guess or use general "
+        "knowledge.\n\n"
+        f"OBJECTIVE: {objective}{entities_line}\n"
+        f"EXPECTED OUTPUT: {expected_output}"
+    )
+
+    blocks = []
+    used = 0
+    for filename, content in files.items():
+        text = content if isinstance(content, str) else str(content or "")
+        if len(text) > MAX_FILE_ANALYSIS_PER_FILE_CHARS:
+            head = MAX_FILE_ANALYSIS_PER_FILE_CHARS // 2
+            text = text[:head] + "\n\n[...truncated...]\n\n" + text[-(MAX_FILE_ANALYSIS_PER_FILE_CHARS - head):]
+        block = f"## {filename}\n\n{text}\n\n---\n\n"
+        if used + len(block) > MAX_FILE_ANALYSIS_TOTAL_CHARS:
+            break
+        blocks.append(block)
+        used += len(block)
+
+    user_message = "# SOURCE DATA\n\n" + ("".join(blocks) if blocks else "(no source files available)")
+    return system_prompt, user_message
+
+
+def handle_dispatch_task(project_name, tool_input):
+    task_id = tool_input["task_id"]
+    method = tool_input["research_method"]
+    task_row = research_work_items_repo.get(task_id)
+    if task_row is None:
+        raise ValueError(f"No such research task: {task_id}")
+
+    research_task_service.transition_task(task_id, "RUNNING")
+    prompt_preview = task_row["objective"] or task_row["title"]
+    run_id = research_run_service.create_run(project_name, None, None, prompt_preview)
+    research_run_service.update_run(project_name, run_id, research_work_item_id=task_id)
+
+    if method == "FILE_ANALYSIS":
+        files = _selected_project_files(project_name)
+        system_prompt, user_message = _build_file_analysis_prompt(task_row, files)
+        output_text = llm_service.prompt_completion(system_prompt, user_message, max_tokens=3000)
+        research_run_service.update_run(
+            project_name, run_id, status="completed", output_text=output_text,
+            completed_at=datetime.now().isoformat(),
+        )
+        return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "completed"}
+
+    # TARGETED_WEB
+    response = openai_service.start_deep_research(prompt_preview)
+    research_run_service.update_run(project_name, run_id, response_id=response.id)
+    return {"task_id": task_id, "run_id": run_id, "research_method": method, "status": "running"}
+
+
+TOOL_HANDLERS["dispatch_task"] = handle_dispatch_task

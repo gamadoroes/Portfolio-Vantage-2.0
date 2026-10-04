@@ -1,6 +1,6 @@
 import pytest
 
-from db.repositories import projects_repo, research_work_items_repo
+from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
 from services import insights_service, project_service, research_task_service, supervisor_service
 
 
@@ -238,4 +238,65 @@ def test_handle_create_followup_task_raises_for_unknown_task(temp_db):
     with pytest.raises(ValueError):
         supervisor_service.handle_create_followup_task("P", {
             "task_id": 9999, "followup_title": "x", "reason": "x",
+        })
+
+
+def test_handle_dispatch_task_file_analysis_completes_synchronously(temp_db, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from services import project_service
+    project_service.create_project("P")
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
+    research_work_items_repo.update_fields(task_id, status="READY")
+
+    monkeypatch.setattr(
+        supervisor_service.llm_service, "prompt_completion",
+        lambda system_prompt, user_message, max_tokens=3000: "The fee is $40,000.",
+    )
+
+    result = supervisor_service.handle_dispatch_task("P", {
+        "task_id": task_id, "research_method": "FILE_ANALYSIS", "reason": "files are available",
+    })
+
+    assert result["status"] == "completed"
+    task_row = research_work_items_repo.get(task_id)
+    assert task_row["status"] == "RUNNING"  # dispatch never reviews -- that's a separate call
+    run = research_runs_repo.find_latest_for_work_item(task_id)
+    assert run["status"] == "completed"
+    assert run["output_text"] == "The fee is $40,000."
+
+
+def test_handle_dispatch_task_targeted_web_starts_async_job(temp_db, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from services import project_service
+    project_service.create_project("P")
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
+    research_work_items_repo.update_fields(task_id, status="READY")
+
+    class FakeResponse:
+        id = "resp_123"
+        status = "queued"
+
+    monkeypatch.setattr(
+        supervisor_service.openai_service, "start_deep_research",
+        lambda prompt: FakeResponse(),
+    )
+
+    result = supervisor_service.handle_dispatch_task("P", {
+        "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "needs live web data",
+    })
+
+    assert result["status"] == "running"
+    task_row = research_work_items_repo.get(task_id)
+    assert task_row["status"] == "RUNNING"
+    run = research_runs_repo.find_latest_for_work_item(task_id)
+    assert run["status"] == "running"
+    assert run["response_id"] == "resp_123"
+
+
+def test_handle_dispatch_task_raises_for_unknown_task(temp_db):
+    with pytest.raises(ValueError):
+        supervisor_service.handle_dispatch_task("P", {
+            "task_id": 9999, "research_method": "FILE_ANALYSIS", "reason": "x",
         })
