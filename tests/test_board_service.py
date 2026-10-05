@@ -389,3 +389,13 @@ def test_activity_reads_in_plain_words(pid):
     board_service.ACTIONS["approve"]("P", card_id)
     activity = board_service.get_board_state("P")["activity"]
     assert activity[0] == {"at": activity[0]["at"], "actor": "you", "text": 'You approved "Fees".'}
+
+
+def test_state_tolerates_gaps_and_focus_stored_as_strings(pid):
+    # Rows written before list-normalisation could hold a JSON string instead of a list.
+    card_id = _card(pid, status="FAILED")
+    research_work_items_repo.update_fields(
+        card_id, identified_gaps_json=json.dumps("\n- First gap\n- Second gap"), entities_json=json.dumps("Fees"))
+    card = next(c for c in board_service.get_board_state("P")["cards"] if c["id"] == card_id)
+    assert card["gaps"] == ["First gap", "Second gap"]
+    assert card["focus"] == ["Fees"]

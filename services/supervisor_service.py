@@ -46,12 +46,28 @@ def _one_line(text, limit):
     return _clip_run_output(flattened, limit)
 
 
+def as_text_list(value):
+    """A list of non-empty strings from a field that should be a list.
+
+    The tool schemas ask for arrays, but the live model sometimes sends one string instead,
+    often a bulleted block ("\\n- first\\n- second"). Split that into its lines.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        lines = (line.strip().lstrip("-*•").strip() for line in value.splitlines())
+        return [line for line in lines if line]
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value)]
+
+
 def _json_list(value):
     try:
         parsed = json.loads(value) if value else []
     except ValueError:
         return []
-    return [str(v) for v in parsed] if isinstance(parsed, list) else []
+    return as_text_list(parsed)
 
 
 def _card_details(item):
@@ -322,7 +338,7 @@ def handle_propose_tasks(project_name, tool_input):
     for t in tasks_input:
         created = create_drafted_card(
             project_name, t["phase_key"], t["title"].strip(), research_method=t["research_method"],
-            focus=t.get("focus") or None, rationale=t.get("rationale"),
+            focus=as_text_list(t.get("focus")) or None, rationale=t.get("rationale"),
             framework_key=resolve_framework(t["phase_key"], t.get("framework_key")),
             priority=t.get("priority") if t.get("priority") in ("low", "medium", "high") else None,
         )
@@ -377,7 +393,7 @@ def create_followup_card(project_name, original, followup):
         method = original["research_method"] if original["research_method"] in DRAFTABLE_METHODS else "TARGETED_WEB"
     created = create_drafted_card(
         project_name, original["phase_key"], (followup.get("title") or f"Follow-up: {original['title']}").strip(),
-        research_method=method, focus=followup.get("focus") or None,
+        research_method=method, focus=as_text_list(followup.get("focus")) or None,
         rationale=followup.get("rationale") or f"Fills gaps found in \"{original['title']}\".",
         framework_key=original["framework_key"], suggested_from_work_item_id=original["id"],
     )
@@ -406,7 +422,9 @@ def _apply_review(project_name, card, tool_input):
         card["id"],
         completeness_score=tool_input.get("completeness_score"),
         evidence_score=tool_input.get("evidence_score"),
-        identified_gaps=tool_input.get("identified_gaps"),
+        identified_gaps=(
+            as_text_list(tool_input["identified_gaps"]) if tool_input.get("identified_gaps") is not None else None
+        ),
     )
     followup_id = None
     if outcome == "FOLLOW_UP_REQUIRED" and tool_input.get("followup"):

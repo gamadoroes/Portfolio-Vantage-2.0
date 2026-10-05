@@ -473,3 +473,33 @@ def test_review_sees_the_report_clipped_to_the_existing_limit(temp_db, app_conte
     content = client.calls[0]["messages"][0]["content"]
     assert "x" * supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS in content
     assert "x" * (supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS + 1) not in content
+
+
+# ---- the live model sometimes sends a list-typed field as one string ----
+
+def test_review_gaps_sent_as_one_bulleted_string_are_stored_as_a_list(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review(
+        "FAILED", identified_gaps="\n- No real universities analysed\n* Only one institution\n\n")]))
+    supervisor_service.review_card("P", card_id)
+    stored = json.loads(research_work_items_repo.get(card_id)["identified_gaps_json"])
+    assert stored == ["No real universities analysed", "Only one institution"]
+
+
+def test_focus_sent_as_a_string_is_stored_as_a_list(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _install(monkeypatch, _FakeClient([_propose(_task(focus="Fees\nDelivery"))]))
+    supervisor_service.draft_researches("P")
+    (item,) = research_work_items_repo.list_for_project(pid)
+    assert json.loads(item["entities_json"]) == ["Fees", "Delivery"]
+
+
+def test_follow_up_focus_sent_as_a_string_is_stored_as_a_list(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", followup={
+        "title": "Verify intakes", "focus": "Intakes", "research_method": "TARGETED_WEB"})]))
+    result = supervisor_service.review_card("P", card_id)
+    follow = research_work_items_repo.get(result["followup_card_id"])
+    assert json.loads(follow["entities_json"]) == ["Intakes"]

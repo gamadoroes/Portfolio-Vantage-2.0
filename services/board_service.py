@@ -106,8 +106,17 @@ def _clean_focus(value):
     return [str(v).strip() for v in (value or []) if str(v).strip()]
 
 
+def _json_text_list(raw):
+    """A stored JSON list field as a list of strings, also accepting rows that hold a plain string."""
+    try:
+        value = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return supervisor_service.as_text_list(value)
+
+
 def _focus(card):
-    return json.loads(card["entities_json"]) if card["entities_json"] else []
+    return _json_text_list(card["entities_json"])
 
 
 # ---- card actions ----
@@ -264,7 +273,7 @@ def needs_followup(project_name, card_id):
     _require_status(card, ("WAITING_FOR_HUMAN",))
     _transition(card_id, "REVIEWING")
     _transition(card_id, "FOLLOW_UP_REQUIRED")
-    gaps = json.loads(card["identified_gaps_json"]) if card["identified_gaps_json"] else []
+    gaps = _json_text_list(card["identified_gaps_json"])
     rationale = "You asked for a follow-up." + (f" Gaps found: {'; '.join(gaps)}" if gaps else "")
     supervisor_service.create_followup_card(
         project_name, card, {"title": f"Follow-up: {card['title']}", "focus": _focus(card), "rationale": rationale},
@@ -464,7 +473,7 @@ def _card_state(project_id, card, cards, by_id, run_row, last_review_event):
         "followups": [_brief(c) for c in cards if c["suggested_from_work_item_id"] == card["id"]],
         "depends_on": [_brief(d) for d in deps if d is not None],
         "completeness_score": card["completeness_score"], "evidence_score": card["evidence_score"],
-        "gaps": json.loads(card["identified_gaps_json"]) if card["identified_gaps_json"] else [],
+        "gaps": _json_text_list(card["identified_gaps_json"]),
         "human_review_required": bool(card["human_review_required"]),
         "retry_count": card["retry_count"], "max_retries": card["max_retries"],
         "run": _run_state(project_id, run_row), "review_error": review_error,
