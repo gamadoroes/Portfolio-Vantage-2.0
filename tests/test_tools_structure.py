@@ -55,10 +55,13 @@ def test_the_supervisor_saves_facts_only_through_record_research_facts():
                                           "update_evidence_status", "extract_research_facts"})
 
 
+REVIEW_INPUT_FIELDS = {"task_id", "completeness_score", "evidence_score", "identified_gaps", "outcome", "reason", "followup"}
+
+
 def test_the_review_menu_is_unchanged_and_the_review_has_no_fact_fields():
     assert supervisor_service.REVIEW_MENU == ("evaluate_research_output",)
     props = tools.claude_tools(["evaluate_research_output"])[0]["input_schema"]["properties"]
-    assert "facts" not in props and "conclusions" not in props
+    assert set(props) == REVIEW_INPUT_FIELDS  # the exact set: any added field (facts or otherwise) fails here
 
 
 @pytest.mark.parametrize("name,caller", [

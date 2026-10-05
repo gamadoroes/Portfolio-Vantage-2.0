@@ -698,7 +698,8 @@ def test_a_review_is_followed_by_one_extraction_that_reads_the_whole_report(temp
     # The review call is exactly as before.
     assert [t["name"] for t in review_call["tools"]] == ["evaluate_research_output"]
     assert review_call["max_tokens"] == 2000
-    assert "facts" not in review_call["tools"][0]["input_schema"]["properties"]
+    assert set(review_call["tools"][0]["input_schema"]["properties"]) == {
+        "task_id", "completeness_score", "evidence_score", "identified_gaps", "outcome", "reason", "followup"}
     assert "LATE DETAIL" not in review_call["messages"][0]["content"]
     # The extraction call reads the rest of the report.
     assert [t["name"] for t in extract_call["tools"]] == ["record_research_facts"]
