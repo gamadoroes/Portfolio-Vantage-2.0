@@ -265,3 +265,74 @@ def test_set_review_scores_with_multiple_fields(temp_db):
     assert row["completeness_score"] == 0.85
     assert row["evidence_score"] == 0.9
     assert row["identified_gaps_json"] == '["Gap 1", "Gap 2"]'
+
+
+@pytest.mark.parametrize("from_status,to_status", [
+    ("READY", "PROPOSED"),
+    ("SKIPPED", "PROPOSED"),
+    ("FAILED", "PROPOSED"),
+    ("REVIEWING", "FAILED"),
+    ("REVIEWING", "RUNNING"),
+])
+def test_research_board_edges_are_legal(temp_db, from_status, to_status):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _make_task(pid, status=from_status)
+    research_task_service.transition_task(task_id, to_status)
+    assert research_work_items_repo.get(task_id)["status"] == to_status
+
+
+def test_reviewing_to_failed_counts_a_retry(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _make_task(pid, status="REVIEWING")
+    research_task_service.transition_task(task_id, "FAILED")
+    assert research_work_items_repo.get(task_id)["retry_count"] == 1
+
+
+def test_create_task_stores_board_fields(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    origin = research_task_service.create_task(pid, "4", "Origin")
+    task_id = research_task_service.create_task(
+        pid, "4", "Card", research_method="TARGETED_WEB", entities=["Fees"],
+        prompt_text="A long research prompt", framework_key="oes-product-features",
+        rationale="Because", suggested_from_work_item_id=origin,
+    )
+    row = research_work_items_repo.get(task_id)
+    assert row["prompt_text"] == "A long research prompt"
+    assert row["framework_key"] == "oes-product-features"
+    assert row["rationale"] == "Because"
+    assert row["suggested_from_work_item_id"] == origin
+    assert row["entities_json"] == '["Fees"]'
+
+
+def test_claim_transition_wins_once(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _make_task(pid, status="READY")
+    assert research_task_service.claim_transition(task_id, "READY", "RUNNING") is True
+    assert research_task_service.claim_transition(task_id, "READY", "RUNNING") is False
+
+
+def test_claim_transition_rejects_an_edge_not_in_the_table(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = _make_task(pid, status="PROPOSED")
+    with pytest.raises(ValueError):
+        research_task_service.claim_transition(task_id, "PROPOSED", "RUNNING")
+    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"
+
+
+def test_phase7_readiness_counts_phases_with_a_complete_item(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    for phase in ("1", "2"):
+        tid = research_work_items_repo.create(pid, phase, f"Phase {phase}")
+        research_work_items_repo.update_fields(tid, status="COMPLETE")
+    tid = research_work_items_repo.create(pid, "3", "Not finished")
+    research_work_items_repo.update_fields(tid, status="FOLLOW_UP_REQUIRED")
+    readiness = research_task_service.phase7_readiness(pid)
+    assert readiness == {"ready_phases": ["1", "2"], "ready_count": 2, "unlocked": False}
+
+
+def test_phase7_readiness_unlocks_when_all_six_have_complete_items(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    for phase in ("1", "2", "3", "4", "5", "6"):
+        tid = research_work_items_repo.create(pid, phase, f"Phase {phase}")
+        research_work_items_repo.update_fields(tid, status="COMPLETE")
+    assert research_task_service.phase7_readiness(pid)["unlocked"] is True

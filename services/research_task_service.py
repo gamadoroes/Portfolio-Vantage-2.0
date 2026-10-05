@@ -4,15 +4,22 @@ from db.repositories import research_work_items_repo
 
 ALLOWED_TRANSITIONS = {
     "PROPOSED": {"READY", "SKIPPED"},
-    "READY": {"RUNNING", "SKIPPED"},
+    # READY -> PROPOSED: the user un-approves, or edits an approved card.
+    "READY": {"RUNNING", "SKIPPED", "PROPOSED"},
     "RUNNING": {"REVIEWING", "FAILED", "COMPLETE"},
-    "REVIEWING": {"COMPLETE", "FOLLOW_UP_REQUIRED", "WAITING_FOR_HUMAN"},
+    # REVIEWING -> FAILED: review outcome "failed" (the review claim moves RUNNING -> REVIEWING first).
+    # REVIEWING -> RUNNING: system only, releasing a review claim after an error or a stale claim.
+    "REVIEWING": {"COMPLETE", "FOLLOW_UP_REQUIRED", "WAITING_FOR_HUMAN", "FAILED", "RUNNING"},
     "WAITING_FOR_HUMAN": {"REVIEWING", "COMPLETE", "FAILED"},
     "FOLLOW_UP_REQUIRED": {"READY"},
-    "FAILED": {"READY", "SKIPPED"},
+    # FAILED -> PROPOSED: the user moves a failed card back to draft to edit it.
+    "FAILED": {"READY", "SKIPPED", "PROPOSED"},
     "COMPLETE": set(),
-    "SKIPPED": set(),
+    # SKIPPED -> PROPOSED: the user restores a skipped card.
+    "SKIPPED": {"PROPOSED"},
 }
+
+PHASE7_PREREQUISITE_PHASES = ("1", "2", "3", "4", "5", "6")
 
 VALID_PRIORITIES = {"low", "medium", "high"}
 
@@ -20,7 +27,8 @@ VALID_PRIORITIES = {"low", "medium", "high"}
 def create_task(
     project_id, phase_key, title, objective=None, priority=None, research_method=None,
     entities=None, expected_output=None, source_requirements=None,
-    human_review_required=False, max_retries=3,
+    human_review_required=False, max_retries=3, prompt_text=None, framework_key=None,
+    rationale=None, suggested_from_work_item_id=None,
 ):
     if priority is not None and priority not in VALID_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority!r}. Must be one of {sorted(VALID_PRIORITIES)}")
@@ -34,6 +42,10 @@ def create_task(
         source_requirements_json=json.dumps(source_requirements) if source_requirements else None,
         human_review_required=1 if human_review_required else 0,
         max_retries=max_retries,
+        prompt_text=prompt_text,
+        framework_key=framework_key,
+        rationale=rationale,
+        suggested_from_work_item_id=suggested_from_work_item_id,
     )
 
 
@@ -61,6 +73,18 @@ def transition_task(work_item_id, new_status):
     if new_status == "FAILED":
         fields["retry_count"] = item["retry_count"] + 1
     research_work_items_repo.update_fields(work_item_id, **fields)
+
+
+def claim_transition(work_item_id, from_status, to_status):
+    """Atomically move a card from from_status to to_status; False if it was not in from_status.
+
+    Used where two requests could race for the same card: READY -> RUNNING (Run),
+    RUNNING -> REVIEWING (review claim) and REVIEWING -> RUNNING (releasing a claim).
+    These edges carry no guards, so skipping transition_task's checks is safe.
+    """
+    if to_status not in ALLOWED_TRANSITIONS.get(from_status, set()):
+        raise ValueError(f"Cannot transition from {from_status} to {to_status}")
+    return research_work_items_repo.claim_status(work_item_id, from_status, to_status)
 
 
 def _assert_dependencies_satisfied(work_item_id):
@@ -146,3 +170,15 @@ def set_review_scores(task_id, completeness_score=None, evidence_score=None, ide
 
 def flag_for_human_review(task_id):
     research_work_items_repo.update_fields(task_id, human_review_required=1)
+
+
+def phase7_readiness(project_id):
+    ready = [
+        phase_key for phase_key in PHASE7_PREREQUISITE_PHASES
+        if any(item["status"] == "COMPLETE" for item in research_work_items_repo.list_for_phase(project_id, phase_key))
+    ]
+    return {
+        "ready_phases": ready,
+        "ready_count": len(ready),
+        "unlocked": len(ready) == len(PHASE7_PREREQUISITE_PHASES),
+    }
