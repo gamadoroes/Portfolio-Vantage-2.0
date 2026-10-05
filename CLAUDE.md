@@ -45,7 +45,8 @@ python -m pytest tests/ -v
 
 - **Single-page app** — `templates/index.html` + `static/app.js` + `static/style.css`
 - No framework; vanilla JS with Marked.js (markdown), DOMPurify (sanitization), Turndown (HTML→MD)
-- 6 tabs: Builder, Prompt Developer, Insights, Methodology, Objective, Artifacts
+- 6 tabs: Builder, Research, Insights, Methodology, Objective, Artifacts
+- **Research** tab (`static/board.js`, `routes/board.py`, `services/board_service.py`): the Supervisor drafts research cards with prompts built from the phase frameworks (`services/prompt_frameworks.json`); the user edits, approves and runs them; finished reports are reviewed automatically and saved as phase-linked sources. Nothing runs without the user's approval.
 - Chat uses Server-Sent Events (`text/event-stream`) for real-time LLM streaming
 
 ### Data Model
@@ -67,7 +68,7 @@ Each project directory contains:
 - **Atomic writes** in `storage.py`: temp file → lock → `os.replace()` → retry with backoff (handles OneDrive locks)
 - **API endpoints** follow `/api/{resource}` pattern
 - **Project context** stored in Flask session (`current_project`) and client-side localStorage
-- **7 research phases** (Landscape, Student, Marketing, Product, Academic, Industry, Options) are hard-coded **client-side only**, in `static/app.js`'s `PHASE_DEFINITIONS` (plus the per-phase prompt/guidance/boundary text also in app.js). The Python backend has no knowledge of phase identity or meaning — it only hides `insights.json` from file listings and prunes dangling references in it. See `docs/ARCHITECTURE.md` §7-10 before moving any of this server-side.
+- **7 research phases:** definitions are in `services/phases.py` (server) and `PHASE_DEFINITIONS` in `static/app.js` (client, for Insights). The phase research frameworks live server-side in `services/prompt_frameworks.json`.
 
 ## Configuration
 

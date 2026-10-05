@@ -3,6 +3,8 @@ import pytest
 from app import create_app
 from db.connection import set_database_path
 from db.migrate_runner import apply_migrations
+from db.repositories import projects_repo, research_work_items_repo
+from services import research_task_service
 
 
 @pytest.fixture
@@ -82,35 +84,13 @@ def test_list_tasks_returns_a_current_summary_for_every_phase(client):
     done_id = client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "A"}).get_json()["id"]
     client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "B"})
     for status in ("READY", "RUNNING", "COMPLETE"):
-        client.post(f"/api/research-tasks/{done_id}/transition", json={"status": status})
+        research_task_service.transition_task(done_id, status)
 
     summaries = client.get("/api/research-tasks", query_string={"project": "P"}).get_json()["phase_summaries"]
 
     assert sorted(summaries) == ["1", "2", "3", "4", "5", "6", "7"]
     assert summaries["4"]["status_counts"] == {"COMPLETE": 1, "PROPOSED": 1}
     assert summaries["1"]["status_counts"] == {}  # a phase with no tasks is present, and empty
-
-
-def test_transition_task_route(client):
-    _create_project(client)
-    create_resp = client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "A"})
-    task_id = create_resp.get_json()["id"]
-
-    resp = client.post(f"/api/research-tasks/{task_id}/transition", json={"status": "READY"})
-    assert resp.get_json()["success"] is True
-
-    list_resp = client.get("/api/research-tasks", query_string={"project": "P"})
-    assert list_resp.get_json()["tasks"][0]["status"] == "READY"
-
-
-def test_transition_task_illegal_returns_400_with_error(client):
-    _create_project(client)
-    create_resp = client.post("/api/research-tasks", json={"project": "P", "phase_key": "4", "title": "A"})
-    task_id = create_resp.get_json()["id"]
-
-    resp = client.post(f"/api/research-tasks/{task_id}/transition", json={"status": "COMPLETE"})
-    assert resp.status_code == 400
-    assert "error" in resp.get_json()
 
 
 def test_add_and_remove_dependency_routes(client):
@@ -122,15 +102,15 @@ def test_add_and_remove_dependency_routes(client):
     assert resp.get_json()["success"] is True
 
     # A depends on B, which is still PROPOSED -- A cannot go READY yet.
-    blocked = client.post(f"/api/research-tasks/{a_id}/transition", json={"status": "READY"})
-    assert blocked.status_code == 400
+    with pytest.raises(ValueError):
+        research_task_service.transition_task(a_id, "READY")
 
     del_resp = client.delete(f"/api/research-tasks/{a_id}/dependencies/{b_id}")
     assert del_resp.get_json()["success"] is True
 
     # Dependency removed -- A can go READY now.
-    allowed = client.post(f"/api/research-tasks/{a_id}/transition", json={"status": "READY"})
-    assert allowed.get_json()["success"] is True
+    research_task_service.transition_task(a_id, "READY")
+    assert research_work_items_repo.get(a_id)["status"] == "READY"
 
 
 def test_add_dependency_cycle_returns_400(client):
@@ -141,3 +121,12 @@ def test_add_dependency_cycle_returns_400(client):
 
     resp = client.post(f"/api/research-tasks/{b_id}/dependencies", json={"depends_on_task_id": a_id})
     assert resp.status_code == 400
+
+
+def test_generic_transition_endpoint_is_gone(client):
+    client.post("/api/projects", json={"name": "P"})
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_work_items_repo.create(pid, "4", "Task")
+    resp = client.post(f"/api/research-tasks/{task_id}/transition", json={"project": "P", "status": "RUNNING"})
+    assert resp.status_code in (404, 405)
+    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"

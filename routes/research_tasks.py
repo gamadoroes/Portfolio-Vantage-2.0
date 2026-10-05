@@ -90,19 +90,6 @@ def list_tasks_route():
     return jsonify({"tasks": [_serialize_task(r) for r in rows], "phase_summaries": phase_summaries})
 
 
-@research_tasks_bp.route("/api/research-tasks/<int:task_id>/transition", methods=["POST"])
-def transition_task_route(task_id):
-    data = request.get_json(silent=True) or {}
-    new_status = data.get("status")
-    if not new_status:
-        return jsonify({"success": False, "error": "Missing status"}), 400
-    try:
-        research_task_service.transition_task(task_id, new_status)
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)}), 400
-    return jsonify({"success": True})
-
-
 @research_tasks_bp.route("/api/research-tasks/<int:task_id>/dependencies", methods=["POST"])
 def add_dependency_route(task_id):
     data = request.get_json(silent=True) or {}

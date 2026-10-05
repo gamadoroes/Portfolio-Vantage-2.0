@@ -15,7 +15,6 @@ from routes.main import main_bp
 from routes.projects import projects_bp
 from routes.prompts import prompts_bp
 from routes.research_tasks import research_tasks_bp
-from routes.supervisor import supervisor_bp
 
 
 def create_app():
@@ -36,7 +35,6 @@ def create_app():
     app.register_blueprint(prompts_bp)
     app.register_blueprint(ai_bp)
     app.register_blueprint(research_tasks_bp)
-    app.register_blueprint(supervisor_bp)
     app.register_blueprint(board_bp)
 
     # Bring the schema up to date on the first request, not here: `from app import

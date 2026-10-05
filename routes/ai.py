@@ -15,7 +15,6 @@ from services.file_service import load_project_files
 from services.llm_service import edit_completion, prompt_completion, stream_chat_completion
 from services.openai_service import retrieve_deep_research, start_deep_research
 from services.project_service import load_project_prompt, normalize_project_name, project_exists
-from services.prompt_drafting_service import strip_prompt_budget_sections as _strip_prompt_budget_sections
 from services.research_run_service import (
     cancel_run,
     complete_run,
@@ -348,36 +347,6 @@ OUTPUT (rewritten text only):"""
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@ai_bp.route("/api/prompt-dev", methods=["POST"])
-def prompt_dev():
-    try:
-        data = request.json or {}
-        framework = data.get("framework", "general")
-        inputs = data.get("inputs", {})
-        system_prompt = data.get(
-            "system_prompt",
-            "ROLE: Prompt Engineer. TASK: Produce a high-quality, copy-ready prompt.",
-        )
-
-        user_lines = [f"Framework: {framework}"]
-        for key, value in inputs.items():
-            user_lines.append(f"{key}: {value}")
-        user_message = (
-            "Create a prompt based on the following inputs:\n"
-            + "\n".join(user_lines)
-            + "\n\nOUTPUT RULES:\n"
-            + "- Do not include token budgets, budget allocation, token counts, runtime limits, or timeframe sections.\n"
-            + "- Do not include headings like 'Token Budget Allocation' or 'Budget & Timeline'.\n"
-            + "- Return only the final prompt text."
-        )
-
-        prompt_text = prompt_completion(system_prompt, user_message)
-        prompt_text = _strip_prompt_budget_sections(prompt_text)
-        return jsonify({"success": True, "prompt": prompt_text})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @ai_bp.route("/api/deep-research/start", methods=["POST"])

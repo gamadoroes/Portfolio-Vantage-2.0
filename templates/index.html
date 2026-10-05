@@ -64,7 +64,6 @@
             <div class="top-bar">
                 <div class="tabs">
                     <button class="tab active" onclick="showTab('write')">Builder</button>
-                    <button class="tab" onclick="showTab('prompt-dev')">Prompt Developer</button> 
                     <button class="tab" onclick="showTab('research')">Research</button>
                     <button class="tab" onclick="showTab('insights')">Insights</button> 
                     <button class="tab" onclick="showTab('rules')">Methodology</button>
@@ -152,69 +151,6 @@
                         <div class="rb-empty">Select a project to see its research plan.</div>
                     </div>
                 </div>
-            </div>
-            <div id="prompt-dev-tab" class="tab-content">
-              <div style="flex:1; overflow-y:auto; padding-bottom:50px;">
-                <div class="settings-container" style="max-width: 800px; margin: 2rem auto; padding: 0 1rem;">
-                    <h2>Prompt Engineering Studio</h2>
-                    <p style="color:#666; margin-bottom:1.5rem;">Configure a high-performance prompt based on expert frameworks.</p>
-                    <div class="form-group" style="margin-bottom: 1rem;">
-                        <label style="display:block; margin-bottom:0.5rem; font-weight:500;">Select Framework</label>
-                        <select id="prompt-framework-select" onchange="updatePromptForm()">
-                            <optgroup label="OES Research Phases">
-                                <option value="oes-landscape">Phase 1: The Landscape</option>
-                                <option value="oes-student-persona">Phase 2: The Student</option>
-                            </optgroup>
-                            <optgroup label="Phase 3: Review of Marketing">
-                                <option value="oes-marketing-comparative">3a: Comparative Marketing Analysis</option>
-                                <option value="oes-marketing-website">3b: Website Review</option>
-                                <option value="oes-marketing-sentiment">3c: Sentiment Analysis &amp; Social Listening</option>
-                            </optgroup>
-                            <optgroup label="OES Research Phases (cont.)">
-                                <option value="oes-product-features">Phase 4: Product Features</option>
-                            </optgroup>
-                            <optgroup label="Phase 5: Academic Content">
-                                <option value="oes-academic-structure">5a: Course Structure &amp; Academic Differentiators</option>
-                                <option value="oes-academic-unitdive">5b: Unit-by-Unit Deep Dive</option>
-                            </optgroup>
-                            <optgroup label="OES Research Phases (cont.)">
-                                <option value="oes-industry-engagement">Phase 6: Industry Engagement</option>
-                                <option value="oes-options-whitespace">Phase 7: Options for OES</option>
-                            </optgroup>
-                            <optgroup label="Utility">
-                                <option value="deep-research">Deep Research Generator</option>
-                                <option value="web-scraping">Web Scraping / Data Collection</option>
-                            </optgroup>
-                        </select>
-                    </div>
-                    <div id="prompt-form-container" class="form-container"></div>
-                    <div class="button-group" style="margin-top: 2rem;">
-                        <button onclick="generateStructuredPrompt()" class="btn-primary" id="prompt-dev-generate-btn" style="width:100%">✨ Generate Master Prompt</button>
-                    </div>
-                    <div id="prompt-dev-output" class="prompt-dev-output" style="display:none;">
-                        <div class="prompt-dev-header">
-                            <h3>Suggested Prompt</h3>
-                            <div class="button-group-inline">
-                                <button onclick="copyPromptDevPrompt()" class="small-btn">📋 Copy</button>
-                                <button onclick="savePromptDevAsArtifact()" class="small-btn">Save as Artifact</button>
-                                <button onclick="runDeepResearchFromPrompt()" class="btn-primary" id="deep-research-run-btn">🔎 Run Deep Research</button>
-                            </div>
-                        </div>
-                        <textarea id="prompt-dev-editor" class="large-textarea" rows="10" placeholder="Generated prompt will appear here..."></textarea>
-                        <div id="prompt-dev-status" class="prompt-dev-status"></div>
-                    </div>
-                </div>
-
-                <div id="research-runs-section" style="max-width:800px; margin:1.5rem auto; padding:0 1rem;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
-                        <h3 style="margin:0; color:var(--oes-ink);">Research Runs</h3>
-                        <button onclick="refreshResearchRuns()" class="small-btn">Refresh</button>
-                    </div>
-                    <div id="research-runs-list" class="competitor-grid">
-                        <div class="empty-state" style="padding:2rem;">No research runs yet.</div>
-                    </div>
-                </div>
-              </div>
             </div>
 
             <div id="insights-tab" class="tab-content">
@@ -364,14 +300,14 @@
             </div>
         </div>
     </div>
-    <div id="research-runs-indicator" onclick="showTab('prompt-dev')" style="display:none; position:fixed; bottom:1rem; right:1rem; background:var(--oes-ink); color:white; padding:0.5rem 1rem; border-radius:8px; font-size:0.85rem; z-index:200; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2); animation:pulse-glow 2s infinite;">
+    <div id="research-runs-indicator" onclick="showTab('research')" style="display:none; position:fixed; bottom:1rem; right:1rem; background:var(--oes-ink); color:white; padding:0.5rem 1rem; border-radius:8px; font-size:0.85rem; z-index:200; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2); animation:pulse-glow 2s infinite;">
         <span id="runs-indicator-text">0 runs in progress</span>
     </div>
     <div id="insights-indicator" onclick="showTab('insights')" style="display:none; position:fixed; bottom:3.5rem; right:1rem; background:var(--oes-ink); color:white; padding:0.5rem 1rem; border-radius:8px; font-size:0.85rem; z-index:200; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2); animation:pulse-glow 2s infinite;">
         <span id="insights-indicator-text">Generating insights...</span>
     </div>
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=13.3"></script>
+    <script src="/static/app.js?v=13.4"></script>
     <script src="/static/board.js?v=2"></script>
 </body>
 </html>
