@@ -1,6 +1,5 @@
 import json
 import os
-import re
 
 from flask import Blueprint, Response, current_app, jsonify, request, send_file, session, stream_with_context
 
@@ -16,6 +15,7 @@ from services.file_service import load_project_files
 from services.llm_service import edit_completion, prompt_completion, stream_chat_completion
 from services.openai_service import retrieve_deep_research, start_deep_research
 from services.project_service import load_project_prompt, normalize_project_name, project_exists
+from services.prompt_drafting_service import strip_prompt_budget_sections as _strip_prompt_budget_sections
 from services.research_run_service import (
     cancel_run,
     complete_run,
@@ -104,41 +104,6 @@ def _temperature_for_request(stateless, insight_type):
             return 0.25
         return 0.15
     return 0.25
-
-
-def _strip_prompt_budget_sections(prompt_text):
-    if not isinstance(prompt_text, str) or not prompt_text.strip():
-        return prompt_text
-
-    lines = prompt_text.splitlines()
-    cleaned = []
-    skipping_budget_section = False
-
-    for line in lines:
-        stripped = line.strip()
-        heading_match = re.match(r"^#{1,6}\s*(.+?)\s*$", stripped)
-
-        if heading_match:
-            heading = heading_match.group(1).lower()
-            if re.search(r"\b(token budget(?: allocation)?|budget(?:\s*&\s*timeline)?)\b", heading):
-                skipping_budget_section = True
-                continue
-            if skipping_budget_section:
-                skipping_budget_section = False
-
-        if skipping_budget_section:
-            continue
-
-        if re.search(r"\btoken budget\b", stripped, re.IGNORECASE):
-            continue
-        if re.search(r"\b\d{1,3}(?:,\d{3})\s*tokens?\b", stripped, re.IGNORECASE):
-            continue
-
-        cleaned.append(line)
-
-    text = "\n".join(cleaned)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
 
 
 @ai_bp.route("/api/chat", methods=["POST"])
