@@ -65,6 +65,7 @@
                 <div class="tabs">
                     <button class="tab active" onclick="showTab('write')">Builder</button>
                     <button class="tab" onclick="showTab('prompt-dev')">Prompt Developer</button> 
+                    <button class="tab" onclick="showTab('research')">Research</button>
                     <button class="tab" onclick="showTab('insights')">Insights</button> 
                     <button class="tab" onclick="showTab('rules')">Methodology</button>
                     <button class="tab" onclick="showTab('context')">Objective</button>
@@ -145,6 +146,13 @@
                 </div>
             </div> 
 
+            <div id="research-tab" class="tab-content">
+                <div class="rb-scroll">
+                    <div id="research-board" class="rb-wrap">
+                        <div class="rb-empty">Select a project to see its research plan.</div>
+                    </div>
+                </div>
+            </div>
             <div id="prompt-dev-tab" class="tab-content">
               <div style="flex:1; overflow-y:auto; padding-bottom:50px;">
                 <div class="settings-container" style="max-width: 800px; margin: 2rem auto; padding: 0 1rem;">
@@ -363,6 +371,7 @@
         <span id="insights-indicator-text">Generating insights...</span>
     </div>
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=13.1"></script>
+    <script src="/static/app.js?v=13.2"></script>
+    <script src="/static/board.js?v=1"></script>
 </body>
 </html>

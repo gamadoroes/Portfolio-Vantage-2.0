@@ -4692,6 +4692,7 @@ async function loadProject(options) {
     renderResearchRuns();
     resumeActiveRuns();
     syncInsightsControlButtons();
+    if (typeof boardOnProjectLoaded === 'function') boardOnProjectLoaded();
 }
 function switchProject() {
     // Save current project's insights state before switching
@@ -4971,6 +4972,7 @@ function showTab(name) {
     document.querySelectorAll('.tab').forEach(t => { if (t.getAttribute('onclick')?.includes(`'${name}'`)) t.classList.add('active'); });
     
     if (name === 'compiled') renderArtifactsTab();
+    if (name === 'research' && typeof boardOnTabShown === 'function') boardOnTabShown();
     // Chat sessions are created lazily — only when the user actually
     // runs deep research, sends a message, or generates insights.
 }
