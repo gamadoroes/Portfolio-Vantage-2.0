@@ -310,7 +310,7 @@
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
-    const board = { project: null, state: null, view: newView(), timer: null, loadSeq: 0, insightsStale: false };
+    const board = { project: null, state: null, view: newView(), timer: null, loadSeq: 0 };
 
     function activeProject() { return typeof currentProject !== 'undefined' ? currentProject : null; }
     function root() { return document.getElementById('research-board'); }
@@ -401,7 +401,6 @@
             const data = await call('POST', '/api/board/refresh', { project, defer_linking: generationRunning(project) });
             if (seq !== board.loadSeq || project !== activeProject()) return;
             board.state = data.board;
-            if (data.board.linked_reports > 0) board.insightsStale = true;
         } catch (e) {
             if (project !== activeProject()) return;
             board.view.message = e.message;
@@ -667,11 +666,5 @@
         syncProject();
         board.view.adding = { phase_key: '1', title: title || '', draft_prompt: true, research_method: 'TARGETED_WEB' };
         if (board.state) { render(); focusLater('rb-add-title'); }
-    };
-    window.boardMaybeReloadInsights = function () {
-        const project = activeProject();
-        if (!board.insightsStale || !project || generationRunning(project)) return;
-        board.insightsStale = false;
-        if (typeof loadProject === 'function') loadProject({ reloadInsights: true });
     };
 })();

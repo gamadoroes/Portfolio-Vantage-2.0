@@ -3539,13 +3539,17 @@ function switchProject() {
     currentChat = null;
     _saveTabState();
 
-    // Try restoring insights from cache first; loadProject will
-    // skip disk reload (reloadInsights:false) when cache hit.
-    const cacheHit = restoreInsightsFromCache(currentProject);
+    // Only a project with an insights generation still running is restored from the
+    // cache (it holds results not yet saved); loadProject then skips the reload. Any
+    // other project loads from the server, which may have changed since (report links,
+    // the options report). Clear the old project's insights meanwhile so they can't be
+    // edited or saved under the new project.
+    const activeGen = getActiveGenerationForProject(currentProject);
+    const cacheHit = activeGen ? restoreInsightsFromCache(currentProject) : false;
+    if (!cacheHit) resetInsightsUI();
     syncInsightsControlButtons();
 
     // If the new project has an active generation, restore its indicator
-    const activeGen = getActiveGenerationForProject(currentProject);
     if (activeGen) {
         const genCtx = getGenerationContext(activeGen);
         const genType = genCtx ? genCtx.type : '';
@@ -3796,7 +3800,15 @@ async function confirmSaveOutput() {
     loadProject({reloadInsights: false});
 }
 
-function showTab(name) { 
+// The server changes Insights too (the Research tab links finished reports and writes the
+// options report), so the Insights tab shows the server's copy every time it opens. Only a
+// generation running for this project keeps the in-memory copy: it holds unsaved results.
+function reloadInsightsUnlessGenerating() {
+    if (!currentProject || getActiveGenerationForProject(currentProject)) return;
+    loadProject({reloadInsights: true});
+}
+
+function showTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); 
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active')); 
     document.getElementById(`${name}-tab`).classList.add('active'); 
@@ -3804,7 +3816,7 @@ function showTab(name) {
     
     if (name === 'compiled') renderArtifactsTab();
     if (name === 'research' && typeof boardOnTabShown === 'function') boardOnTabShown();
-    if (name === 'insights' && typeof boardMaybeReloadInsights === 'function') boardMaybeReloadInsights();
+    if (name === 'insights') reloadInsightsUnlessGenerating();
     // Chat sessions are created lazily — only when the user actually
     // runs deep research, sends a message, or generates insights.
 }
