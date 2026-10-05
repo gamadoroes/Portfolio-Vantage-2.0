@@ -50,3 +50,5 @@ instance/
 
 # Git worktrees for subagent-driven plan execution
 .worktrees/
+# daily database snapshots (see db/backup.py)
+backups/

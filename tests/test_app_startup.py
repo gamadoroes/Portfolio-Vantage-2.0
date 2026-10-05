@@ -6,7 +6,7 @@ import time
 import pytest
 
 from app import create_app
-from db import migrate_runner
+from db import backup, migrate_runner
 from db.connection import set_database_path
 
 OLD_VERSIONS = {"0001_initial", "0002_evidence_filename_snapshot"}
@@ -83,3 +83,26 @@ def test_simultaneous_first_requests_apply_migrations_only_once(outdated_db, mon
 
     assert len(calls) == 1
     assert PHASE_2_AND_3_VERSIONS <= _applied_versions(outdated_db)
+
+
+def test_a_request_takes_one_daily_snapshot_not_one_per_request(temp_db, tmp_path):
+    flask_app = create_app()
+    flask_app.config["BACKUP_DIR"] = str(tmp_path / "snaps")
+    client = flask_app.test_client()
+
+    client.get("/")
+    client.get("/")
+    client.get("/")
+
+    assert len(list((tmp_path / "snaps").glob("app-*.db"))) == 1
+
+
+def test_a_failing_snapshot_never_breaks_a_request(temp_db, tmp_path, monkeypatch):
+    def disk_full(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(backup, "ensure_daily_snapshot", disk_full)
+    flask_app = create_app()
+    flask_app.config["BACKUP_DIR"] = str(tmp_path / "snaps")
+
+    assert flask_app.test_client().get("/").status_code == 200

@@ -1,9 +1,10 @@
 from flask import Flask
 import os
 import threading
+import time
 
 from config import Config
-from db import migrate_runner
+from db import backup, migrate_runner
 from routes.ai import ai_bp
 from routes.artifacts import artifacts_bp
 from routes.chats import chats_bp
@@ -39,15 +40,26 @@ def create_app():
     # app` runs create_app() at import time, and importing must not modify a database.
     schema_lock = threading.Lock()
     schema_ready = {"done": False}
+    snapshot_check = {"next_at": 0.0}  # time.monotonic() of the next "is a daily snapshot due?" check
 
     @app.before_request
     def ensure_schema_is_current():
-        if schema_ready["done"]:
-            return
-        with schema_lock:
-            if not schema_ready["done"]:
-                migrate_runner.apply_migrations()
-                schema_ready["done"] = True
+        if not schema_ready["done"]:
+            with schema_lock:
+                if not schema_ready["done"]:
+                    migrate_runner.apply_migrations()
+                    schema_ready["done"] = True
+
+        # Daily snapshot: checked at most hourly, by one request at a time. A failed snapshot is
+        # reported but must never break the request that happened to trigger it.
+        if time.monotonic() >= snapshot_check["next_at"]:
+            with schema_lock:
+                if time.monotonic() >= snapshot_check["next_at"]:
+                    snapshot_check["next_at"] = time.monotonic() + 3600
+                    try:
+                        backup.ensure_daily_snapshot(app.config["BACKUP_DIR"])
+                    except Exception as exc:
+                        print(f"[backup] could not write the daily snapshot: {exc}")
 
     return app
 

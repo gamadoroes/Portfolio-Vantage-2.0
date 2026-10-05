@@ -1,10 +1,27 @@
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-_DEFAULT_DB_PATH = "instance/app.db"
 _db_path_override = None
+
+
+def default_database_path():
+    """Per-user, absolute, and outside any synced project folder.
+
+    The first default was the relative path "instance/app.db". It depended on the folder the app
+    was launched from, and it sat inside OneDrive, where syncing a live SQLite database can
+    corrupt it.
+
+    On Windows this deliberately avoids AppData: the Microsoft Store build of Python silently
+    redirects writes under %LOCALAPPDATA% into a private per-package folder, so a database there
+    is invisible to Explorer, backup tools and every other Python.
+    """
+    home = Path(os.path.expanduser("~"))
+    if sys.platform == "win32":
+        return str(home / "PortfolioVantage" / "app.db")
+    return str(home / ".local" / "share" / "PortfolioVantage" / "app.db")
 
 
 def set_database_path(path):
@@ -16,7 +33,7 @@ def set_database_path(path):
 def get_database_path():
     if _db_path_override:
         return Path(_db_path_override)
-    return Path(os.environ.get("DATABASE_PATH", _DEFAULT_DB_PATH))
+    return Path(os.environ.get("DATABASE_PATH") or default_database_path())
 
 
 def has_database_path_override():
