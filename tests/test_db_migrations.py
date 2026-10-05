@@ -24,7 +24,7 @@ def test_apply_migrations_is_idempotent(temp_db):
     apply_migrations()
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
-    assert count == 4
+    assert count == 5
 
 
 def test_agent_decisions_and_research_runs_schema(temp_db):
@@ -103,3 +103,11 @@ def test_foreign_keys_enforced(temp_db):
         except Exception:
             with_fk_error = True
         assert with_fk_error
+
+
+def test_research_board_columns(temp_db):
+    with get_connection() as conn:
+        item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(research_work_items)").fetchall()}
+        run_cols = {r["name"] for r in conn.execute("PRAGMA table_info(research_runs)").fetchall()}
+    assert {"prompt_text", "framework_key", "rationale", "suggested_from_work_item_id"}.issubset(item_cols)
+    assert {"prompt_text", "report_stable_file_id", "report_linked_at"}.issubset(run_cols)

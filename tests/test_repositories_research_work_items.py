@@ -88,3 +88,34 @@ def test_add_dependency_is_idempotent(temp_db):
     research_work_items_repo.add_dependency(a, b)
     research_work_items_repo.add_dependency(a, b)  # must not raise (duplicate PK)
     assert len(research_work_items_repo.list_dependencies(a)) == 1
+
+
+def test_create_stores_board_fields(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    origin = research_work_items_repo.create(pid, "4", "Origin")
+    wid = research_work_items_repo.create(
+        pid, "4", "Follow-up", prompt_text="Find the fees", framework_key="oes-product-features",
+        rationale="Fees were missing", suggested_from_work_item_id=origin,
+    )
+    row = research_work_items_repo.get(wid)
+    assert row["prompt_text"] == "Find the fees"
+    assert row["framework_key"] == "oes-product-features"
+    assert row["rationale"] == "Fees were missing"
+    assert row["suggested_from_work_item_id"] == origin
+
+
+def test_claim_status_moves_only_from_expected_status(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    wid = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(wid, status="READY")
+    assert research_work_items_repo.claim_status(wid, "READY", "RUNNING") is True
+    assert research_work_items_repo.get(wid)["status"] == "RUNNING"
+
+
+def test_claim_status_second_claim_fails(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    wid = research_work_items_repo.create(pid, "4", "Task")
+    research_work_items_repo.update_fields(wid, status="READY")
+    assert research_work_items_repo.claim_status(wid, "READY", "RUNNING") is True
+    assert research_work_items_repo.claim_status(wid, "READY", "RUNNING") is False
+    assert research_work_items_repo.get(wid)["status"] == "RUNNING"
