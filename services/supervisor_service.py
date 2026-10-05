@@ -18,6 +18,10 @@ MAX_CONTEXT_CHARS = 60000
 MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
 MAX_RUN_OUTPUT_REVIEW_CHARS = 8000
 MAX_REVIEW_OUTPUT_TOTAL_CHARS = 24000
+# Each task line also carries what the card is about, kept short.
+MAX_FOCUS_CHARS = 150
+MAX_RATIONALE_CHARS = 200
+MAX_GAPS_CHARS = 300
 
 
 def _clip_run_output(text, limit):
@@ -36,6 +40,34 @@ def _awaiting_review(item, run):
     )
 
 
+def _one_line(text, limit):
+    """Flatten text onto one line (quotes made single) and clip it, for a task line."""
+    flattened = " ".join(str(text or "").split()).replace('"', "'")
+    return _clip_run_output(flattened, limit)
+
+
+def _json_list(value):
+    try:
+        parsed = json.loads(value) if value else []
+    except ValueError:
+        return []
+    return [str(v) for v in parsed] if isinstance(parsed, list) else []
+
+
+def _card_details(item):
+    """Method, focus, why and review gaps, so drafting and review see what each card is about."""
+    parts = [f"method={item['research_method'] or 'none'}"]
+    focus = _json_list(item["entities_json"])
+    if focus:
+        parts.append(f"focus=\"{_one_line(', '.join(focus), MAX_FOCUS_CHARS)}\"")
+    if item["rationale"]:
+        parts.append(f"rationale=\"{_one_line(item['rationale'], MAX_RATIONALE_CHARS)}\"")
+    gaps = _json_list(item["identified_gaps_json"])
+    if gaps:
+        parts.append(f"gaps=\"{_one_line('; '.join(gaps), MAX_GAPS_CHARS)}\"")
+    return " | " + " ".join(parts)
+
+
 def _format_work_item(item, dependencies, run=None, review_output_limit=None):
     dep_ids = [d["depends_on_work_item_id"] for d in dependencies]
     dep_text = f" | depends on: {dep_ids}" if dep_ids else ""
@@ -45,6 +77,7 @@ def _format_work_item(item, dependencies, run=None, review_output_limit=None):
         f"completeness={item['completeness_score']} evidence={item['evidence_score']} "
         f"retry={item['retry_count']}/{item['max_retries']} "
         f"human_review_required={bool(item['human_review_required'])}{dep_text}"
+        f"{_card_details(item)}"
     )
     if run is None:
         return line
@@ -60,8 +93,7 @@ def _format_work_item(item, dependencies, run=None, review_output_limit=None):
             f"{line}\n<run_output task_id={item['id']}>\n"
             f"{_clip_run_output(output, review_output_limit)}\n</run_output>"
         )
-    flattened = " ".join(output.split()).replace('"', "'")
-    return f'{line} | run_output="{_clip_run_output(flattened, MAX_RUN_OUTPUT_PREVIEW_CHARS)}"'
+    return f'{line} | run_output="{_one_line(output, MAX_RUN_OUTPUT_PREVIEW_CHARS)}"'
 
 
 def build_context(project_name):

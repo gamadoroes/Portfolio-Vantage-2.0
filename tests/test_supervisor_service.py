@@ -161,6 +161,30 @@ def test_build_context_caps_total_output_shown_for_tasks_awaiting_review(temp_db
         assert f"- id={task_id} " in context
 
 
+def test_build_context_shows_each_cards_method_focus_rationale_and_gaps_on_its_line(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    task_id = research_task_service.create_task(
+        pid, "4", "Fees", research_method="TARGETED_WEB", entities=["Fees", "FEE-HELP"],
+        rationale='Price drives "choice"\nfor career changers. ' + "x" * 500,
+    )
+    research_work_items_repo.update_fields(
+        task_id, status="FOLLOW_UP_REQUIRED", completeness_score=0.6,
+        identified_gaps_json=json.dumps(["No intake dates", "No fees for Torrens"]),
+    )
+    research_work_items_repo.create(pid, "2", "Bare card")
+
+    lines = supervisor_service.build_context("P").splitlines()
+    line = next(x for x in lines if x.startswith(f"- id={task_id} "))
+    assert "status=FOLLOW_UP_REQUIRED" in line and "completeness=0.6" in line
+    assert "method=TARGETED_WEB" in line
+    assert 'focus="Fees, FEE-HELP"' in line
+    assert "rationale=\"Price drives 'choice' for career changers." in line
+    assert 'gaps="No intake dates; No fees for Torrens"' in line
+    assert len(line) < 800  # the long rationale is clipped
+    bare = next(x for x in lines if 'title="Bare card"' in x)
+    assert "method=none" in bare and "rationale=" not in bare and "gaps=" not in bare
+
+
 def test_build_context_includes_recent_decisions(temp_db):
     from db.repositories import agent_decisions_repo
     pid = projects_repo.get_or_create_id("P")
