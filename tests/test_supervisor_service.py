@@ -393,7 +393,11 @@ def test_review_is_forced_to_the_review_tool(temp_db, app_context, monkeypatch):
     call = client.calls[0]
     assert [t["name"] for t in call["tools"]] == ["review_outcome"]
     assert call["tool_choice"] == {"type": "tool", "name": "review_outcome"}
-    assert "Report body." in call["messages"][0]["content"]
+    content = call["messages"][0]["content"]
+    assert "Report body." in content
+    # The briefing shows the card as it was before the review claimed it.
+    assert "status=RUNNING" in content
+    assert "status=REVIEWING" not in content
 
 
 @pytest.mark.parametrize("outcome,status", [

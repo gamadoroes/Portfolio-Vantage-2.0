@@ -369,8 +369,11 @@ def _review_context(project_name, task):
     phase_title = PHASE_DEFINITIONS.get(card["phase_key"], {}).get("title", card["phase_key"])
     prompt = _clip_run_output(run["prompt_text"] or card["prompt_text"] or "", MAX_REVIEW_PROMPT_CHARS)
     excerpt = run["report_excerpt"]
+    # review_card has already claimed the card (RUNNING -> REVIEWING); the briefing shows it as it was before.
+    card = {**card, "status": "RUNNING"}
     item_line = _format_work_item(
         card, card["dependency_ids"], {"status": run["status"], "output_text": excerpt},
+        # The excerpt is already clipped to the review limit; this passes it through unchanged.
         review_output_limit=max(len(excerpt), 1),
     )
     return (
