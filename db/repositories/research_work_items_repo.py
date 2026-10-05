@@ -75,6 +75,44 @@ def claim_status(id, from_status, to_status):
         return cur.rowcount == 1
 
 
+def update_editable(id, expected_updated_at=None, **fields):
+    """Write content fields and set status to PROPOSED in one statement.
+
+    Only succeeds while the card is still PROPOSED or READY, so an edit or re-draft
+    can never land on a card that has since started running, and an approved card
+    is always sent back for approval together with its new content.
+    With expected_updated_at, it also requires the card to be untouched since it was read
+    (for a slow job, such as a Claude draft, that started from a snapshot of the card).
+    Returns True only if this call made the change.
+    """
+    fields["status"] = "PROPOSED"
+    fields["updated_at"] = datetime.now().isoformat()
+    columns = ", ".join(f"{k} = ?" for k in fields)
+    where = "id = ? AND status IN ('PROPOSED', 'READY')"
+    values = list(fields.values()) + [id]
+    if expected_updated_at is not None:
+        where += " AND updated_at = ?"
+        values.append(expected_updated_at)
+    with get_connection() as conn:
+        cur = conn.execute(f"UPDATE research_work_items SET {columns} WHERE {where}", values)
+        return cur.rowcount == 1
+
+
+def claim_status_if_unchanged(id, from_status, to_status, updated_at):
+    """Like claim_status, but only if the card has not been touched since it was read.
+
+    Used by approval: the card is validated against a snapshot, and the approval only
+    counts if that snapshot is still the card's current state.
+    """
+    now = datetime.now().isoformat()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE research_work_items SET status = ?, updated_at = ? WHERE id = ? AND status = ? AND updated_at = ?",
+            (to_status, now, id, from_status, updated_at),
+        )
+        return cur.rowcount == 1
+
+
 def add_dependency(work_item_id, depends_on_work_item_id):
     now = datetime.now().isoformat()
     with get_connection() as conn:

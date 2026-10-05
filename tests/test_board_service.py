@@ -173,6 +173,32 @@ def test_redraft_failure_keeps_the_users_prompt(pid, monkeypatch):
     assert research_work_items_repo.get(card_id)["prompt_text"] == GOOD_PROMPT
 
 
+def test_redraft_drops_the_draft_if_the_card_was_approved_during_the_call(pid, monkeypatch):
+    card_id = _card(pid, framework_key="oes-product-features")
+
+    def approve_meanwhile(system, user, max_tokens=4000):
+        research_work_items_repo.update_fields(card_id, status="READY")
+        return "ROLE: analyst. A complete drafted research prompt for this card."
+    monkeypatch.setattr(llm_service, "prompt_completion", approve_meanwhile)
+    with pytest.raises(board_service.BoardStateError):
+        board_service.ACTIONS["redraft"]("P", card_id)
+    row = research_work_items_repo.get(card_id)
+    assert (row["status"], row["prompt_text"]) == ("READY", GOOD_PROMPT)
+
+
+def test_approve_is_refused_if_the_card_was_edited_after_it_was_checked(pid, monkeypatch):
+    card_id = _card(pid)
+    real = research_task_service.dependencies_satisfied
+
+    def edit_meanwhile(work_item_id):
+        research_work_items_repo.update_fields(work_item_id, prompt_text="Edited by someone else just now, quite different.")
+        return real(work_item_id)
+    monkeypatch.setattr(research_task_service, "dependencies_satisfied", edit_meanwhile)
+    with pytest.raises(board_service.BoardStateError):
+        board_service.ACTIONS["approve"]("P", card_id)
+    assert _status(card_id) == "PROPOSED"
+
+
 def test_create_card_with_my_own_prompt(pid):
     card_id = board_service.create_card("P", {"phase_key": "2", "title": "Personas", "research_method": "FILE_ANALYSIS",
                                               "focus": ["Career changers"], "prompt_text": GOOD_PROMPT, "draft_prompt": False})

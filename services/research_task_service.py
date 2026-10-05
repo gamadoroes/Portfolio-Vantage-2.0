@@ -95,6 +95,15 @@ def _assert_dependencies_satisfied(work_item_id):
             raise ValueError(f"Cannot move to READY: dependency {dep_id} is not complete")
 
 
+def dependencies_satisfied(work_item_id):
+    """True when every research this one waits for is COMPLETE or SKIPPED."""
+    try:
+        _assert_dependencies_satisfied(work_item_id)
+    except ValueError:
+        return False
+    return True
+
+
 def add_dependency(work_item_id, depends_on_work_item_id):
     if work_item_id == depends_on_work_item_id:
         raise ValueError("A task cannot depend on itself")

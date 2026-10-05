@@ -62,9 +62,12 @@ def _card(project_name, card_id):
     return card
 
 
+_CHANGED_MESSAGE = "This research has changed since the board was loaded. The board has been refreshed."
+
+
 def _require_status(card, allowed):
     if card["status"] not in allowed:
-        raise BoardStateError("This research has changed since the board was loaded. The board has been refreshed.")
+        raise BoardStateError(_CHANGED_MESSAGE)
 
 
 _FRIENDLY_TRANSITION_ERRORS = (
@@ -85,7 +88,7 @@ def _transition(card_id, to_status):
 
 def _claim(card_id, from_status, to_status):
     if not research_task_service.claim_transition(card_id, from_status, to_status):
-        raise BoardStateError("This research has changed since the board was loaded. The board has been refreshed.")
+        raise BoardStateError(_CHANGED_MESSAGE)
 
 
 def _record(project_name, decision_type, card=None, **detail):
@@ -164,9 +167,9 @@ def edit_card(project_name, card_id, data):
     changed = {k: v for k, v in fields.items() if card[k] != v}
     if not changed:
         return card_id
-    if card["status"] == "READY":
-        _claim(card_id, "READY", "PROPOSED")  # claim first so a Run racing this edit cannot start it
-    research_work_items_repo.update_fields(card_id, **changed)
+    # One statement: a Run or approval racing this edit cannot see the new text on an approved card.
+    if not research_work_items_repo.update_editable(card_id, **changed):
+        raise BoardStateError(_CHANGED_MESSAGE)
     _record(project_name, "user_edit_unapproved" if card["status"] == "READY" else "user_edit", card)
     return card_id
 
@@ -185,7 +188,11 @@ def approve(project_name, card_id):
         raise ValueError("The research prompt is too short to send. Describe what the research should find out.")
     if card["research_method"] == "SYNTHESIS" and not research_task_service.phase7_readiness(card["project_id"])["unlocked"]:
         raise BoardStateError(research_execution_service.PHASE7_LOCKED_MESSAGE)
-    _transition(card_id, "READY")
+    if not research_task_service.dependencies_satisfied(card_id):
+        raise BoardStateError(_FRIENDLY_TRANSITION_ERRORS[0][1])
+    # Only approve the exact card that was validated above; any edit since then wins.
+    if not research_work_items_repo.claim_status_if_unchanged(card_id, "PROPOSED", "READY", card["updated_at"]):
+        raise BoardStateError(_CHANGED_MESSAGE)
     _record(project_name, "user_approve", card)
 
 
@@ -236,9 +243,12 @@ def redraft(project_name, card_id):
     )
     if not draft["drafted"]:
         raise DraftingUnavailable("Couldn't draft from the framework just now. Your prompt is unchanged.")
-    if card["status"] == "READY":
-        _claim(card_id, "READY", "PROPOSED")
-    research_work_items_repo.update_fields(card_id, prompt_text=draft["prompt_text"], framework_key=draft["framework_key"])
+    # The Claude call above is slow; if the card was approved, edited or started meanwhile, drop the draft.
+    if not research_work_items_repo.update_editable(
+        card_id, expected_updated_at=card["updated_at"],
+        prompt_text=draft["prompt_text"], framework_key=draft["framework_key"],
+    ):
+        raise BoardStateError(_CHANGED_MESSAGE)
     _record(project_name, "user_redraft", card)
 
 

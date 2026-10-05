@@ -119,3 +119,45 @@ def test_claim_status_second_claim_fails(temp_db):
     assert research_work_items_repo.claim_status(wid, "READY", "RUNNING") is True
     assert research_work_items_repo.claim_status(wid, "READY", "RUNNING") is False
     assert research_work_items_repo.get(wid)["status"] == "RUNNING"
+
+
+def _item(status="PROPOSED"):
+    pid = projects_repo.get_or_create_id("P")
+    item_id = research_work_items_repo.create(pid, "4", "Fees", prompt_text="original")
+    if status != "PROPOSED":
+        research_work_items_repo.update_fields(item_id, status=status)
+    return item_id
+
+
+def test_update_editable_writes_content_and_unapproves_in_one_step(temp_db):
+    item_id = _item("READY")
+    assert research_work_items_repo.update_editable(item_id, prompt_text="new") is True
+    row = research_work_items_repo.get(item_id)
+    assert (row["prompt_text"], row["status"]) == ("new", "PROPOSED")
+
+
+def test_update_editable_refuses_cards_that_have_moved_on(temp_db):
+    for status in ("RUNNING", "REVIEWING", "COMPLETE", "SKIPPED", "FAILED"):
+        item_id = _item(status)
+        assert research_work_items_repo.update_editable(item_id, prompt_text="new") is False
+        row = research_work_items_repo.get(item_id)
+        assert (row["prompt_text"], row["status"]) == ("original", status)
+
+
+def test_update_editable_can_require_an_untouched_card(temp_db):
+    item_id = _item()
+    seen = research_work_items_repo.get(item_id)["updated_at"]
+    research_work_items_repo.update_fields(item_id, status="READY")
+    assert research_work_items_repo.update_editable(item_id, expected_updated_at=seen, prompt_text="new") is False
+    assert research_work_items_repo.get(item_id)["prompt_text"] == "original"
+
+
+def test_claim_status_if_unchanged_refuses_a_stale_snapshot(temp_db):
+    item_id = _item()
+    seen = research_work_items_repo.get(item_id)["updated_at"]
+    research_work_items_repo.update_fields(item_id, prompt_text="edited meanwhile")
+    assert research_work_items_repo.claim_status_if_unchanged(item_id, "PROPOSED", "READY", seen) is False
+    assert research_work_items_repo.get(item_id)["status"] == "PROPOSED"
+    fresh = research_work_items_repo.get(item_id)["updated_at"]
+    assert research_work_items_repo.claim_status_if_unchanged(item_id, "PROPOSED", "READY", fresh) is True
+    assert research_work_items_repo.get(item_id)["status"] == "READY"
