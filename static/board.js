@@ -372,11 +372,269 @@
         render();
     }
 
-    // ---- interactions (Task 10) ----
+    // ---- interactions ----
 
-    window.boardOnTabShown = function () { loadBoard(); };
+    function isEditing() {
+        const v = board.view;
+        return v.objEdit || !!v.adding || Object.keys(v.editing).some(k => v.editing[k]);
+    }
+
+    function schedulePoll() {
+        clearTimeout(board.timer);
+        board.timer = null;
+        if (!board.state || !tabVisible()) return;
+        if (!board.state.cards.some(c => ACTIVE.includes(c.status))) return;
+        board.timer = setTimeout(() => { if (tabVisible()) refreshBoard(); }, 15000);
+    }
+
+    function generationRunning(project) {
+        return typeof getActiveGenerationForProject === 'function' && !!getActiveGenerationForProject(project);
+    }
+
+    async function refreshBoard() {
+        const project = syncProject();
+        if (!project) { render(); return; }
+        const firstLoad = !board.state;
+        if (firstLoad) render();
+        const seq = ++board.loadSeq;
+        try {
+            const data = await call('POST', '/api/board/refresh', { project, defer_linking: generationRunning(project) });
+            if (seq !== board.loadSeq || project !== activeProject()) return;
+            board.state = data.board;
+            if (data.board.linked_reports > 0) board.insightsStale = true;
+        } catch (e) {
+            if (project !== activeProject()) return;
+            board.view.message = e.message;
+        }
+        // Don't redraw under someone who is typing; the next action or refresh will.
+        if (firstLoad || !isEditing()) render();
+        schedulePoll();
+    }
+
+    function takeState(data) {
+        board.loadSeq++;  // anything still in flight is now stale
+        if (data && data.board) board.state = data.board;
+        render();
+        schedulePoll();
+    }
+
+    function handleError(err, cardId) {
+        if (cardId != null) board.view.cardErrors[cardId] = err.message;
+        else board.view.message = err.message;
+        if (err.status === 404 || err.status === 409) loadBoard(); else render();
+    }
+
+    async function attempt(cardId, fn) {
+        if (cardId != null) delete board.view.cardErrors[cardId];
+        try { await fn(); } catch (err) { handleError(err, cardId); }
+    }
+
+    function closeEditor(id) {
+        delete board.view.editing[id];
+        delete board.view.drafts[id];
+    }
+
+    function cardAction(id, action) {
+        return call('POST', `/api/board/cards/${id}/${action}`, { project: board.project });
+    }
+
+    async function saveDraftEdits(id) {
+        const payload = editPayload(board.view.drafts[id]);
+        if (Object.keys(payload).length) {
+            await call('PATCH', `/api/board/cards/${id}`, Object.assign({ project: board.project }, payload));
+        }
+    }
+
+    function simple(action) {
+        return el => { const id = Number(el.dataset.id); attempt(id, async () => takeState(await cardAction(id, action))); };
+    }
+
+    function focusLater(elementId) {
+        const el = document.getElementById(elementId);
+        if (el) el.focus();
+    }
+
+    const ACTIONS = {
+        reload() { board.view.message = ''; refreshBoard(); },
+        dismiss() { board.view.message = ''; render(); },
+        filter(el) { board.view.filter = el.dataset.val; render(); },
+        phase(el) { const k = el.dataset.phase; board.view.closedPhases[k] = !board.view.closedPhases[k]; render(); },
+        edit(el) { const id = Number(el.dataset.id); board.view.editing[id] = true; render(); focusLater(`rb-prompt-${id}`); },
+        close(el) { closeEditor(Number(el.dataset.id)); render(); },
+        save(el) {
+            const id = Number(el.dataset.id);
+            attempt(id, async () => {
+                await saveDraftEdits(id);
+                closeEditor(id);
+                takeState(await call('GET', `/api/board?project=${encodeURIComponent(board.project)}`));
+            });
+        },
+        approve(el) {
+            const id = Number(el.dataset.id);
+            attempt(id, async () => {
+                await saveDraftEdits(id);
+                const data = await cardAction(id, 'approve');
+                closeEditor(id);
+                takeState(data);
+            });
+        },
+        redraft(el) {
+            const id = Number(el.dataset.id);
+            el.disabled = true;
+            el.textContent = 'Drafting…';
+            attempt(id, async () => {
+                await saveDraftEdits(id);
+                const data = await cardAction(id, 'redraft');
+                if (board.view.drafts[id]) delete board.view.drafts[id].prompt_text;
+                takeState(data);
+            });
+        },
+        unapprove: simple('unapprove'),
+        skip: simple('skip'),
+        restore: simple('restore'),
+        retry: simple('retry'),
+        'back-to-draft': simple('back-to-draft'),
+        accept: simple('accept'),
+        'needs-followup': simple('needs-followup'),
+        'mark-failed': simple('mark-failed'),
+        add(el) {
+            board.view.adding = { phase_key: el.dataset.phase, draft_prompt: true, research_method: 'TARGETED_WEB' };
+            render();
+            focusLater('rb-add-title');
+        },
+        'add-cancel'() { board.view.adding = null; render(); },
+        'add-save'() {
+            const adding = board.view.adding;
+            if (!adding) return;
+            attempt(null, async () => {
+                board.view.busy = true;
+                render();
+                let data;
+                try { data = await call('POST', '/api/board/cards', addPayload(board.project, adding)); }
+                finally { board.view.busy = false; }
+                board.view.adding = null;
+                takeState(data);
+            });
+        },
+        draft() {
+            attempt(null, async () => {
+                board.view.busy = true;
+                board.view.supervisorNote = '';
+                render();
+                let data;
+                try { data = await call('POST', '/api/board/draft', { project: board.project }); }
+                finally { board.view.busy = false; }
+                board.view.supervisorNote = data.note || '';
+                takeState(data);
+            });
+        },
+        'draft-options'() {
+            attempt(null, async () => {
+                board.view.busy = true;
+                render();
+                let data;
+                try { data = await call('POST', '/api/board/phase7/draft', { project: board.project }); }
+                finally { board.view.busy = false; }
+                takeState(data);
+            });
+        },
+        'run-open'() { board.view.confirming = true; render(); },
+        'run-cancel'() { board.view.confirming = false; render(); },
+        'run-start'() {
+            const ids = board.state.cards.filter(c => c.status === 'READY').map(c => c.id);
+            board.view.confirming = false;
+            attempt(null, async () => {
+                const data = await call('POST', '/api/board/run', { project: board.project, card_ids: ids });
+                const result = data.result || {};
+                const notes = [];
+                if ((result.not_ready || []).length) {
+                    notes.push(`${pluralise(result.not_ready.length, 'research was', 'researches were')} no longer approved and did not start.`);
+                }
+                if ((result.failed || []).length) {
+                    notes.push(`${pluralise(result.failed.length, 'research', 'researches')} could not start: ${result.failed.map(f => f.error).join(' ')}`);
+                }
+                board.view.message = notes.join(' ');
+                takeState(data);
+            });
+        },
+        'obj-edit'() { board.view.objEdit = true; render(); focusLater('rb-obj-input'); },
+        'obj-cancel'() { board.view.objEdit = false; render(); },
+        'obj-save'() {
+            const input = document.getElementById('rb-obj-input');
+            const value = input ? input.value : '';
+            attempt(null, async () => {
+                const data = await call('PUT', '/api/board/objective', { project: board.project, objective: value });
+                board.view.objEdit = false;
+                const objectiveTab = document.getElementById('project-prompt');
+                if (objectiveTab) objectiveTab.value = value;
+                if (typeof projectData === 'object' && projectData) projectData.project_prompt = value;
+                takeState(data);
+            });
+        },
+        report(el) {
+            const id = Number(el.dataset.id);
+            attempt(id, async () => {
+                const data = await call('GET', `/api/board/cards/${id}/report?project=${encodeURIComponent(board.project)}`);
+                showReader(data.report);
+            });
+        },
+    };
+
+    function showReader(report) {
+        closeReader();
+        const overlay = document.createElement('div');
+        overlay.id = 'rb-reader';
+        overlay.className = 'rb-reader';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', report.title);
+        const body = typeof renderMarkdown === 'function' ? renderMarkdown(report.text) : `<pre>${esc(report.text)}</pre>`;
+        const file = report.filename ? `<p class="rb-hint">Saved in your sources as “${esc(report.filename)}”.</p>` : '';
+        overlay.innerHTML = `<div class="rb-reader-box"><div class="rb-reader-head"><h3>${esc(report.title)}</h3><button type="button" class="rb-btn" data-reader-close>Close</button></div><div class="rb-reader-body markdown-body">${file}${body}</div></div>`;
+        overlay.addEventListener('click', e => { if (e.target === overlay || e.target.closest('[data-reader-close]')) closeReader(); });
+        document.body.appendChild(overlay);
+        overlay.querySelector('[data-reader-close]').focus();
+    }
+    function closeReader() { const el = document.getElementById('rb-reader'); if (el) el.remove(); }
+
+    function onField(ev) {
+        const el = ev.target;
+        if (!el.closest || !el.closest('#research-board')) return;
+        if (el.dataset.field && el.dataset.id) {
+            const id = Number(el.dataset.id);
+            board.view.drafts[id] = board.view.drafts[id] || {};
+            if (el.type !== 'radio' || el.checked) board.view.drafts[id][el.dataset.field] = el.value;
+        } else if (el.dataset.add && board.view.adding) {
+            if (el.type === 'radio' && !el.checked) return;
+            board.view.adding[el.dataset.add] = el.type === 'checkbox' ? el.checked : el.value;
+            if (ev.type === 'change' && (el.dataset.add === 'draft_prompt' || el.dataset.add === 'phase_key')) render();
+        }
+    }
+
+    document.addEventListener('click', ev => {
+        const el = ev.target.closest && ev.target.closest('#research-board [data-act]');
+        if (!el || el.disabled) return;
+        const handler = ACTIONS[el.dataset.act];
+        if (handler) handler(el);
+    });
+    document.addEventListener('input', onField);
+    document.addEventListener('change', onField);
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeReader(); });
+
+    window.boardOnTabShown = function () { refreshBoard(); };
     window.boardOnProjectLoaded = function () {
         if (activeProject() === board.project) return;
-        if (tabVisible()) loadBoard(); else syncProject();
+        if (tabVisible()) refreshBoard(); else syncProject();
+    };
+    window.boardOpenAddResearch = function (title) {
+        syncProject();
+        board.view.adding = { phase_key: '1', title: title || '', draft_prompt: true, research_method: 'TARGETED_WEB' };
+        if (board.state) { render(); focusLater('rb-add-title'); }
+    };
+    window.boardMaybeReloadInsights = function () {
+        const project = activeProject();
+        if (!board.insightsStale || !project || generationRunning(project)) return;
+        board.insightsStale = false;
+        if (typeof loadProject === 'function') loadProject({ reloadInsights: true });
     };
 })();

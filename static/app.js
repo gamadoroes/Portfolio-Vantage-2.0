@@ -2177,11 +2177,8 @@ function renderDataOrMarkdown(label, value, context) {
 }
 
 function triggerDeepResearch(topic) {
-    showTab('prompt-dev');
-    const select = document.getElementById('prompt-framework-select');
-    if(select) { select.value = 'deep-research'; updatePromptForm(); }
-    const topicInput = document.getElementById('pf-topic');
-    if(topicInput) topicInput.value = topic;
+    showTab('research');
+    if (typeof boardOpenAddResearch === 'function') boardOpenAddResearch(topic);
 }
 
 // ---------------------------------------------------------
@@ -3887,7 +3884,7 @@ function resumeActiveRuns() {
     const TERMINAL = ['completed', 'failed', 'cancelled'];
     const runs = projectData.research_runs || {};
     Object.values(runs).forEach(run => {
-        if (!TERMINAL.includes(run.status) && !activeResearchRuns[run.id]) {
+        if (!TERMINAL.includes(run.status) && !activeResearchRuns[run.id] && !run.research_work_item_id) {
             // Use the project stored in the run object (set by create_run on the backend).
             // Falls back to currentProject for legacy runs that pre-date the field.
             const runProject = run.project || currentProject;
@@ -4973,6 +4970,7 @@ function showTab(name) {
     
     if (name === 'compiled') renderArtifactsTab();
     if (name === 'research' && typeof boardOnTabShown === 'function') boardOnTabShown();
+    if (name === 'insights' && typeof boardMaybeReloadInsights === 'function') boardMaybeReloadInsights();
     // Chat sessions are created lazily — only when the user actually
     // runs deep research, sends a message, or generates insights.
 }
