@@ -257,7 +257,7 @@ def _batch_has_cycle(tasks_input):
     return any(visit(i) for i in edges)
 
 
-def _validate_proposals(tasks_input):
+def _validate_proposals(project_id, tasks_input):
     if not tasks_input:
         raise ValueError("No researches were proposed")
     for t in tasks_input:
@@ -269,6 +269,10 @@ def _validate_proposals(tasks_input):
             raise ValueError("Every research needs a title")
         if t.get("research_method") not in DRAFTABLE_METHODS:
             raise ValueError(f"Unknown research method: {t.get('research_method')!r}")
+        for dep_id in t.get("depends_on_existing_ids") or []:
+            existing = research_work_items_repo.get(dep_id) if isinstance(dep_id, int) else None
+            if existing is None or existing["project_id"] != project_id:
+                raise ValueError(f"depends_on_existing_ids value {dep_id!r} is not a research in this project")
         for dep_index in t.get("depends_on_batch_indices") or []:
             if not isinstance(dep_index, int) or dep_index < 0 or dep_index >= len(tasks_input):
                 raise ValueError(
@@ -280,7 +284,7 @@ def _validate_proposals(tasks_input):
 
 def handle_propose_tasks(project_name, tool_input):
     tasks_input = tool_input.get("tasks") or []
-    _validate_proposals(tasks_input)  # everything is checked before anything is created
+    _validate_proposals(projects_repo.get_or_create_id(project_name), tasks_input)  # everything is checked before anything is created
     new_ids = []
     drafted = 0
     for t in tasks_input:

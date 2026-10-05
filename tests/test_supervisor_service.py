@@ -295,6 +295,30 @@ def test_invalid_proposals_create_nothing_and_are_recorded(temp_db, app_context,
     assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "propose_tasks"
 
 
+@pytest.mark.parametrize("make_bad_id", [
+    lambda pid: 99999,
+    lambda pid: research_work_items_repo.create(projects_repo.get_or_create_id("Other"), "1", "Not ours"),
+    lambda pid: "abc",
+])
+def test_bad_existing_dependencies_create_nothing_and_are_recorded(temp_db, app_context, drafted, monkeypatch, make_bad_id):
+    pid = projects_repo.get_or_create_id("P")
+    bad_id = make_bad_id(pid)
+    _install(monkeypatch, _FakeClient([_propose(_task(title="Fine one"), _task(title="Bad dep", depends_on_existing_ids=[bad_id]))]))
+    result = supervisor_service.draft_researches("P")
+    assert result["execution"]["success"] is False
+    assert research_work_items_repo.list_for_project(pid) == []
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "propose_tasks"
+
+
+def test_existing_dependencies_in_the_same_project_are_wired(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    existing = research_work_items_repo.create(pid, "1", "Already there")
+    _install(monkeypatch, _FakeClient([_propose(_task(title="New", depends_on_existing_ids=[existing]))]))
+    assert supervisor_service.draft_researches("P")["execution"]["success"] is True
+    new = [i for i in research_work_items_repo.list_for_project(pid) if i["id"] != existing][0]
+    assert [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(new["id"])] == [existing]
+
+
 def test_a_cycle_between_proposals_creates_nothing(temp_db, app_context, drafted, monkeypatch):
     pid = projects_repo.get_or_create_id("P")
     _install(monkeypatch, _FakeClient([_propose(
