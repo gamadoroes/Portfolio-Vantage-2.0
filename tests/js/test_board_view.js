@@ -109,6 +109,13 @@ test('payload helpers', () => {
     assert.deepStrictEqual(add, { project: 'P', phase_key: '2', title: 'Personas', research_method: 'TARGETED_WEB',
         focus: ['x'], rationale: '', draft_prompt: true, framework_key: null, prompt_text: '' });
 });
+test('objective editor shows the unsaved draft, escaped, in preference to the saved objective', () => {
+    const v = view(); v.objEdit = true;
+    assert(B.objectiveHtml(state([]), v).includes('>Assess the market.</textarea>'));
+    v.objDraft = 'Half <typed> & more';
+    const html = B.objectiveHtml(state([]), v);
+    assert(html.includes('>Half &lt;typed&gt; &amp; more</textarea>') && !html.includes('Assess the market.'));
+});
 test('whole board renders', () => {
     const html = B.renderBoard(state([card(), card({ id: 8, status: 'SKIPPED', title: 'Old' })]), view());
     assert(html.includes('Research plan') && html.includes('Draft next researches') && html.includes('Skipped (1)'));

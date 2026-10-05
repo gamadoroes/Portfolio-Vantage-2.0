@@ -34,7 +34,7 @@
     }
     function newView() {
         return { filter: 'all', closedPhases: {}, editing: {}, drafts: {}, cardErrors: {}, adding: null,
-                 confirming: false, busy: false, supervisorNote: '', message: '', objEdit: false };
+                 confirming: false, busy: false, supervisorNote: '', message: '', objEdit: false, objDraft: null };
     }
     function pluralise(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
     function filterMatches(card, key) { return (FILTERS.find(f => f.key === key) || FILTERS[0]).test(card); }
@@ -80,7 +80,7 @@
 
     function objectiveHtml(state, view) {
         const body = view.objEdit
-            ? `<label class="rb-lbl" for="rb-obj-input">What should this research achieve?</label><textarea id="rb-obj-input" class="rb-obj-input">${esc(state.objective)}</textarea><div class="rb-row"><button type="button" class="rb-btn primary" data-act="obj-save">Save objective</button><button type="button" class="rb-btn" data-act="obj-cancel">Cancel</button></div>`
+            ? `<label class="rb-lbl" for="rb-obj-input">What should this research achieve?</label><textarea id="rb-obj-input" class="rb-obj-input">${esc(typeof view.objDraft === 'string' ? view.objDraft : state.objective)}</textarea><div class="rb-row"><button type="button" class="rb-btn primary" data-act="obj-save">Save objective</button><button type="button" class="rb-btn" data-act="obj-cancel">Cancel</button></div>`
             : `<p class="rb-obj-text">${state.objective ? esc(state.objective) : '<span class="rb-muted">No objective yet. The Supervisor needs one before it can draft researches.</span>'}</p><div class="rb-row"><button type="button" class="rb-btn" data-act="obj-edit">Edit objective</button></div>`;
         const draftBtn = view.busy
             ? '<button type="button" class="rb-btn" disabled>Drafting…</button>'
@@ -306,7 +306,7 @@
     }
 
     const pure = { STATUS, esc, newView, filterMatches, formatElapsed, pluralise, cardHtml, phaseHtml,
-                   runBoxHtml, chipsHtml, renderBoard, editPayload, addPayload };
+                   runBoxHtml, chipsHtml, renderBoard, editPayload, addPayload, objectiveHtml };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -411,22 +411,34 @@
         schedulePoll();
     }
 
+    // An action's result only counts if the user is still on the project it started on.
     function takeState(data) {
+        if (!data || !data.board || data.board.project !== board.project) return;
         board.loadSeq++;  // anything still in flight is now stale
-        if (data && data.board) board.state = data.board;
+        board.state = data.board;
         render();
         schedulePoll();
     }
 
-    function handleError(err, cardId) {
+    function handleError(err, cardId, project) {
+        if (project !== board.project) return;
         if (cardId != null) board.view.cardErrors[cardId] = err.message;
         else board.view.message = err.message;
-        if (err.status === 404 || err.status === 409) loadBoard(); else render();
+        render();
+        // The message stays; the refresh just brings the board back in line with the server.
+        if (err.status === 404 || err.status === 409) refreshBoard();
     }
 
+    // One action at a time per card (or per board), so a double-click can't post twice.
+    const inFlight = new Set();
+
     async function attempt(cardId, fn) {
+        const project = board.project;
+        const key = `${project}|${cardId == null ? 'board' : cardId}`;
+        if (inFlight.has(key)) return;
+        inFlight.add(key);
         if (cardId != null) delete board.view.cardErrors[cardId];
-        try { await fn(); } catch (err) { handleError(err, cardId); }
+        try { await fn(project); } catch (err) { handleError(err, cardId, project); } finally { inFlight.delete(key); }
     }
 
     function closeEditor(id) {
@@ -434,19 +446,22 @@
         delete board.view.drafts[id];
     }
 
-    function cardAction(id, action) {
-        return call('POST', `/api/board/cards/${id}/${action}`, { project: board.project });
+    function cardAction(project, id, action) {
+        return call('POST', `/api/board/cards/${id}/${action}`, { project });
     }
 
-    async function saveDraftEdits(id) {
+    async function saveDraftEdits(project, id) {
         const payload = editPayload(board.view.drafts[id]);
         if (Object.keys(payload).length) {
-            await call('PATCH', `/api/board/cards/${id}`, Object.assign({ project: board.project }, payload));
+            await call('PATCH', `/api/board/cards/${id}`, Object.assign({ project }, payload));
         }
     }
 
     function simple(action) {
-        return el => { const id = Number(el.dataset.id); attempt(id, async () => takeState(await cardAction(id, action))); };
+        return el => {
+            const id = Number(el.dataset.id);
+            attempt(id, async project => takeState(await cardAction(project, id, action)));
+        };
     }
 
     function focusLater(elementId) {
@@ -463,28 +478,32 @@
         close(el) { closeEditor(Number(el.dataset.id)); render(); },
         save(el) {
             const id = Number(el.dataset.id);
-            attempt(id, async () => {
-                await saveDraftEdits(id);
+            attempt(id, async project => {
+                await saveDraftEdits(project, id);
+                const data = await call('GET', `/api/board?project=${encodeURIComponent(project)}`);
+                if (project !== board.project) return;
                 closeEditor(id);
-                takeState(await call('GET', `/api/board?project=${encodeURIComponent(board.project)}`));
+                takeState(data);
             });
         },
         approve(el) {
             const id = Number(el.dataset.id);
-            attempt(id, async () => {
-                await saveDraftEdits(id);
-                const data = await cardAction(id, 'approve');
+            attempt(id, async project => {
+                await saveDraftEdits(project, id);
+                const data = await cardAction(project, id, 'approve');
+                if (project !== board.project) return;
                 closeEditor(id);
                 takeState(data);
             });
         },
         redraft(el) {
             const id = Number(el.dataset.id);
-            el.disabled = true;
-            el.textContent = 'Drafting…';
-            attempt(id, async () => {
-                await saveDraftEdits(id);
-                const data = await cardAction(id, 'redraft');
+            attempt(id, async project => {
+                el.disabled = true;
+                el.textContent = 'Drafting…';
+                await saveDraftEdits(project, id);
+                const data = await cardAction(project, id, 'redraft');
+                if (project !== board.project) return;
                 if (board.view.drafts[id]) delete board.view.drafts[id].prompt_text;
                 takeState(data);
             });
@@ -506,35 +525,41 @@
         'add-save'() {
             const adding = board.view.adding;
             if (!adding) return;
-            attempt(null, async () => {
-                board.view.busy = true;
+            attempt(null, async project => {
+                const view = board.view;
+                view.busy = true;
                 render();
                 let data;
-                try { data = await call('POST', '/api/board/cards', addPayload(board.project, adding)); }
-                finally { board.view.busy = false; }
-                board.view.adding = null;
+                try { data = await call('POST', '/api/board/cards', addPayload(project, adding)); }
+                finally { view.busy = false; }
+                if (project !== board.project) return;
+                view.adding = null;
                 takeState(data);
             });
         },
         draft() {
-            attempt(null, async () => {
-                board.view.busy = true;
-                board.view.supervisorNote = '';
+            attempt(null, async project => {
+                const view = board.view;
+                view.busy = true;
+                view.supervisorNote = '';
                 render();
                 let data;
-                try { data = await call('POST', '/api/board/draft', { project: board.project }); }
-                finally { board.view.busy = false; }
-                board.view.supervisorNote = data.note || '';
+                try { data = await call('POST', '/api/board/draft', { project }); }
+                finally { view.busy = false; }
+                if (project !== board.project) return;
+                view.supervisorNote = data.note || '';
                 takeState(data);
             });
         },
         'draft-options'() {
-            attempt(null, async () => {
-                board.view.busy = true;
+            attempt(null, async project => {
+                const view = board.view;
+                view.busy = true;
                 render();
                 let data;
-                try { data = await call('POST', '/api/board/phase7/draft', { project: board.project }); }
-                finally { board.view.busy = false; }
+                try { data = await call('POST', '/api/board/phase7/draft', { project }); }
+                finally { view.busy = false; }
+                if (project !== board.project) return;
                 takeState(data);
             });
         },
@@ -543,8 +568,10 @@
         'run-start'() {
             const ids = board.state.cards.filter(c => c.status === 'READY').map(c => c.id);
             board.view.confirming = false;
-            attempt(null, async () => {
-                const data = await call('POST', '/api/board/run', { project: board.project, card_ids: ids });
+            render();  // the confirm panel goes away now, so it can't be clicked twice
+            attempt(null, async project => {
+                const data = await call('POST', '/api/board/run', { project, card_ids: ids });
+                if (project !== board.project) return;
                 const result = data.result || {};
                 const notes = [];
                 if ((result.not_ready || []).length) {
@@ -557,14 +584,21 @@
                 takeState(data);
             });
         },
-        'obj-edit'() { board.view.objEdit = true; render(); focusLater('rb-obj-input'); },
-        'obj-cancel'() { board.view.objEdit = false; render(); },
+        'obj-edit'() {
+            board.view.objEdit = true;
+            board.view.objDraft = board.state ? board.state.objective || '' : '';
+            render();
+            focusLater('rb-obj-input');
+        },
+        'obj-cancel'() { board.view.objEdit = false; board.view.objDraft = null; render(); },
         'obj-save'() {
             const input = document.getElementById('rb-obj-input');
-            const value = input ? input.value : '';
-            attempt(null, async () => {
-                const data = await call('PUT', '/api/board/objective', { project: board.project, objective: value });
+            const value = typeof board.view.objDraft === 'string' ? board.view.objDraft : (input ? input.value : '');
+            attempt(null, async project => {
+                const data = await call('PUT', '/api/board/objective', { project, objective: value });
+                if (project !== board.project) return;
                 board.view.objEdit = false;
+                board.view.objDraft = null;
                 const objectiveTab = document.getElementById('project-prompt');
                 if (objectiveTab) objectiveTab.value = value;
                 if (typeof projectData === 'object' && projectData) projectData.project_prompt = value;
@@ -573,8 +607,9 @@
         },
         report(el) {
             const id = Number(el.dataset.id);
-            attempt(id, async () => {
-                const data = await call('GET', `/api/board/cards/${id}/report?project=${encodeURIComponent(board.project)}`);
+            attempt(id, async project => {
+                const data = await call('GET', `/api/board/cards/${id}/report?project=${encodeURIComponent(project)}`);
+                if (project !== board.project) return;
                 showReader(data.report);
             });
         },
@@ -600,7 +635,9 @@
     function onField(ev) {
         const el = ev.target;
         if (!el.closest || !el.closest('#research-board')) return;
-        if (el.dataset.field && el.dataset.id) {
+        if (el.id === 'rb-obj-input') {
+            board.view.objDraft = el.value;
+        } else if (el.dataset.field && el.dataset.id) {
             const id = Number(el.dataset.id);
             board.view.drafts[id] = board.view.drafts[id] || {};
             if (el.type !== 'radio' || el.checked) board.view.drafts[id][el.dataset.field] = el.value;
