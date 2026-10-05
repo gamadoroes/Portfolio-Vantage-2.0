@@ -1,7 +1,7 @@
 # Phase 4b-1: Evidence and findings — Design
 
 **Date:** 2026-10-05
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved in conversation; awaiting written-spec review. Amended 2026-10-05: facts are extracted in a separate call after the review, not inside it (§4.1).
 **Roadmap:** Phase 4, part b, first of three pieces (evidence & findings → targeted search → Power BI). The other two get their own specs.
 **Builds on:** Phase 4a tool layer (`2026-10-05-supervisor-tool-layer-design.md`), Research Board (`2026-10-05-research-board-design.md`).
 
@@ -17,11 +17,11 @@ Finished research reports turn into **individual cited facts** and a few **cited
 | Topic | Decision |
 |---|---|
 | Order | Evidence & findings first; targeted search and Power BI later, each with its own spec. |
-| When facts are made | Inside the existing automatic review — the same single Claude call. |
+| When facts are made | Automatically right after the review, in a second call that reads the full report (up to 60,000 characters). The review call itself is unchanged: it sees only the first 8,000 characters (`services/review_limits.py`), too little to mine facts from. |
 | Sign-off | Facts and conclusions are saved and used straight away; the user can reject (and restore) any. Rejected items are ignored from then on. |
 | Where shown | Insights, per phase, below the phase write-up. |
-| Findings | Short cited conclusions per phase, drafted by the Supervisor during the review, each linked to the facts behind it. |
-| Older reports | An "Extract facts" button on finished cards with no facts yet — one paid Claude call each, only when clicked. |
+| Findings | Short cited conclusions per phase, drafted by the Supervisor in the extraction call that follows the review (or the "Extract facts" button), each linked to the facts behind it. |
+| Older reports | An "Extract facts" button on finished cards with no facts yet — one paid Claude call each, only when clicked. The same button covers a report whose automatic extraction failed or found nothing. |
 | Storage | New, separate tables (approach A). The existing `findings` / `evidence` / `finding_evidence` tables (Insights phase write-ups and linked files) are not touched. |
 | Supervisor search | No search-then-decide loop yet. Drafting gets a "known facts" briefing instead; the search tool exists and can be added to a Supervisor menu later with one line. |
 
@@ -51,7 +51,7 @@ Four new tables. No existing table changes.
 
 **`conclusion_facts`** — `conclusion_id`, `fact_id`, `PRIMARY KEY (conclusion_id, fact_id)`.
 
-**`research_runs.facts_extracted_at`** — the one added column (nullable text), used as an atomic "extraction in progress / done" claim so a double-click cannot pay twice (§4.3).
+**`research_runs.facts_extracted_at`** — the one added column (nullable text), used as an atomic "extraction in progress / done" claim, so neither a double-click nor the automatic step plus a click can pay twice for the same report (§4.1, §4.3).
 
 New repository `db/repositories/evidence_repo.py` holds all SQL for these tables. Tools never touch SQL directly (4a safety rule).
 
@@ -67,7 +67,7 @@ All go through the 4a door (`run_tool`): validated inputs, project scoping of id
 | `record_research_facts` | Saves a batch from one report: up to 25 facts and up to 3 conclusions, via child calls to the three tools above. Checks each item on its own (§4.2). | supervisor |
 | `search_existing_evidence` | Word search over **active** facts (claim, quote, page title), optional phase filter, at most 20 results, newest first. Read-only. | supervisor, user, system |
 | `update_evidence_status` | Reject or restore a fact or a conclusion. | **user only** |
-| `extract_research_facts` | The "Extract facts" button: one paid Claude call that only extracts facts and conclusions from a finished card's report (§4.3). | **user only** |
+| `extract_research_facts` | One paid Claude call that only extracts facts and conclusions from a finished card's report: run by the system right after a review (§4.1), and by the "Extract facts" button (§4.3). | **user, system** (never the Supervisor) |
 
 ### 3.1 Inputs (key fields and limits)
 
@@ -81,13 +81,22 @@ All go through the 4a door (`run_tool`): validated inputs, project scoping of id
 
 ## 4. How facts get made and used
 
-### 4.1 During the automatic review
+### 4.1 Automatically, right after the review
 
-- `evaluate_research_output`'s input gains two optional fields: `facts` and `conclusions` (shapes as in `record_research_facts`). The review prompt asks for the report's key facts (each with the page's address and title and the date it applies to) and up to 3 conclusions for the phase that cite fact numbers.
-- After the scores and before the status change, the review handler makes one child call to `record_research_facts`. A failure **inside** that child (anything it could not save) never fails the review: scores, outcome and follow-up stand.
-- The review's `max_tokens` rises from 2000 to 6000 to fit the longer answer (estimated 3–6 cents more per report).
-- Synthesis (Phase 7 options report) cards are not mined for facts — their content is derived, not sourced.
-- `_clean_review_input` extends to the new fields: recovers leaked `<parameter>` markup (as fixed in c42f1c6), coerces a single string to a list, clips to the limits, drops items that are not objects.
+- The review stays exactly as it is today. `evaluate_research_output` gets no new fields, its `max_tokens` stays at 2000, and its prompt is unchanged. It sees only the first 8,000 characters of a report (`services/review_limits.py`, unchanged), which is too little to mine facts from.
+- After a review succeeds, the system makes **one** extraction call on the same card, as long as the outcome is anything except `FAILED`. It is the same path as the "Extract facts" button (§4.3): `run_tool("extract_research_facts", "system", ...)`.
+  - The call reads up to `MAX_EXTRACT_REPORT_CHARS = 60000` characters of the report.
+  - It answers with `record_research_facts`, the only tool on `EXTRACT_MENU`.
+  - It uses the same atomic run claim (`facts_extracted_at`). The claim is released when nothing is saved or the call fails, so the button stays available for that report.
+- The extraction never affects the review. The review's result, the card's status, its scores and its follow-up stand exactly as the review set them, whatever happens to the extraction. A failure is logged (the tool-call log, plus a printed line), and the review's return value keeps its shape, with an added `extraction` summary key.
+- If the run is already claimed (a click on "Extract facts" got there first), the automatic step makes no Claude call.
+- Synthesis (Phase 7 options report) cards are never mined for facts, because their content is derived from other research, not sourced. A `FAILED` review triggers no extraction.
+- Cost: roughly 10–15 cents more per reviewed report, for the second call. The review itself costs the same as before.
+- The model's answer is cleaned before any tool sees it, as `_clean_review_input` is cleaned for reviews:
+  - leaked `<parameter>` markup is recovered (as fixed in c42f1c6);
+  - a list sent as one string is parsed, and a list cut short keeps its complete items;
+  - one object becomes a list, and a fact whose fields spilled to the top level is rebuilt;
+  - lists are cut to 25 facts and 3 conclusions, and items that are not objects are dropped.
 
 ### 4.2 Checking each item on its own
 
@@ -102,9 +111,12 @@ All go through the 4a door (`run_tool`): validated inputs, project scoping of id
 
 - Shown on a card that is COMPLETE, FOLLOW_UP_REQUIRED or WAITING_FOR_HUMAN, whose latest run has a report, is not a synthesis card, and whose run has not had facts extracted (`facts_extracted_at` empty).
 - The confirm dialog says it makes one paid Claude call.
-- `extract_research_facts` (user only) first claims the run atomically (`facts_extracted_at` set only if empty); a second click gets "already extracting / done". It then calls Claude with a fixed extraction prompt and a menu holding only `record_research_facts` (`EXTRACT_MENU`). If the Claude call fails, the claim is cleared so the user can try again.
-- It changes nothing else about the card (no scores, no status change).
-- The review path also sets `facts_extracted_at` on the run, so the button disappears once a review has extracted facts.
+- `extract_research_facts` is called by the user for the button, and by the system for the automatic step in §4.1. It refuses the Supervisor.
+  - It first claims the run atomically: `facts_extracted_at` is set only if it is empty. A second click, or a click after the automatic step, gets "already extracting / done".
+  - It then calls Claude with a fixed extraction prompt and a menu holding only `record_research_facts` (`EXTRACT_MENU`).
+  - If the Claude call fails, or nothing is saved, the claim is cleared so the user can try again.
+- It changes nothing else about the card: no scores, no status change.
+- Once facts have been saved from a run, whether by the automatic step or by the button, the button disappears for that run.
 
 ### 4.4 Not paying twice — the drafting briefing
 
@@ -114,8 +126,8 @@ All go through the 4a door (`run_tool`): validated inputs, project scoping of id
 
 ### 4.5 Activity feed
 
-- "Supervisor saved 18 facts and 2 conclusions from \"<card>\"." (skipped count added when non-zero).
-- "You rejected a fact." / "You restored a conclusion." / "You extracted facts from \"<card>\"."
+- "Supervisor saved 18 facts and 2 conclusions from \"<card>\"." (skipped count added when non-zero). Both the automatic step and the button record this line.
+- "You rejected a fact." / "You restored a conclusion." / "You extracted facts from \"<card>\"." The last of these is for the button only; the automatic step does not record it.
 
 ## 5. The Insights screen
 
@@ -129,16 +141,25 @@ New file `static/evidence.js` (rendering kept out of the already-large `app.js`)
 ## 6. Safety rules (carried from 4a)
 
 - No tool takes a file path, SQL, or table name; the 4a structure tests extend to the new tools and the new callers table.
-- The Supervisor can save facts, sources and conclusions only through `record_research_facts` on the review/extract menus; it cannot reject, restore, delete, or start the paid extraction.
-- `extract_research_facts` and `update_evidence_status` refuse the Supervisor.
+- The Supervisor can save facts, sources and conclusions only through `record_research_facts` on `EXTRACT_MENU`. It cannot reject, restore, delete, or start the paid extraction.
+- `extract_research_facts` (callers: user, system) and `update_evidence_status` (callers: user) refuse the Supervisor. The review menu is unchanged.
 - Nothing is ever deleted; reject is a status.
 
 ## 7. Testing
 
 - **Tools:** each tool's validation, project scoping, duplicate handling (same URL, same claim), callers, and log rows.
 - **Batch:** a bad fact skipped with a reason while the rest save; a bad source address saved without the source; a conclusion losing a skipped fact; a conclusion with no facts left skipped.
-- **Review:** a review with facts and conclusions; a jumbled one (leaked `<parameter>` markup, facts as one string); a review whose facts all fail still records scores, outcome and follow-up; synthesis cards not mined; `facts_extracted_at` set.
-- **Button:** extraction saves facts without changing status or scores; a second click does not call Claude; a failed Claude call clears the claim.
+- **Automatic extraction after a review:**
+  - A successful review is followed by one extraction call that saves facts, records "Supervisor saved…", and sets `facts_extracted_at`.
+  - A `FAILED` review triggers no extraction, and neither does a synthesis card.
+  - When an extraction fails or saves nothing, the reviewed card's status, scores and follow-up stay exactly as the review set them, and the claim is released.
+  - A review that finishes while the run is already claimed makes no second Claude call.
+  - The review call itself is unchanged: same tool, no new fields, `max_tokens` 2000.
+  - Jumbled extraction answers are recovered: leaked `<parameter>` markup, facts sent as one string, a list cut short, spilled fields.
+- **Button:**
+  - Extraction saves facts without changing status or scores.
+  - A second click does not call Claude, and neither does a click after a successful automatic extraction.
+  - A failed Claude call clears the claim.
 - **Briefing:** known facts per phase appear, rejected facts don't, the section respects its budget.
 - **Screens:** Node tests for `evidence.js` rendering (text not HTML, only http/https links, rejected section, "based on facts" links).
 - **Structure:** the 4a acceptance tests updated with the new tools and callers.
@@ -149,8 +170,8 @@ New file `static/evidence.js` (rendering kept out of the already-large `app.js`)
 1. Migration `0007` + `evidence_repo`.
 2. `save_source`, `save_evidence`, `create_finding`, `search_existing_evidence`, `update_evidence_status`.
 3. `record_research_facts` with per-item checking.
-4. Review integration (prompt, input fields, clean-up, child call, `max_tokens`, `facts_extracted_at`).
-5. `extract_research_facts` + the button.
+4. `extract_research_facts` (callers user and system), with the extraction call (`EXTRACT_MENU`, clean-up of the answer, run claim), run automatically after every non-`FAILED` review.
+5. The "Extract facts" button (board state, route, card and report reader).
 6. Known-facts briefing for drafting.
 7. Routes + `static/evidence.js` + Insights hook + Activity text.
 8. Structure/acceptance tests, docs, browser walkthrough.
