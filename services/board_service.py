@@ -29,7 +29,6 @@ from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase
 from .text_utils import as_text_list
 from .tools import run_tool
 
-MIN_PROMPT_CHARS = 40
 STALE_REVIEW_CLAIM_SECONDS = 600
 ACTIVITY_LIMIT = 30
 USER_PHASES = ("1", "2", "3", "4", "5", "6")
@@ -69,27 +68,6 @@ _CHANGED_MESSAGE = "This research has changed since the board was loaded. The bo
 
 def _require_status(card, allowed):
     if card["status"] not in allowed:
-        raise BoardStateError(_CHANGED_MESSAGE)
-
-
-_FRIENDLY_TRANSITION_ERRORS = (
-    ("dependency", "This research waits for another research to finish first."),
-    ("Retry limit", "This research has failed too many times to retry. Move it back to draft to change it, or skip it."),
-)
-
-
-def _transition(card_id, to_status):
-    try:
-        research_task_service.transition_task(card_id, to_status)
-    except ValueError as exc:
-        for needle, message in _FRIENDLY_TRANSITION_ERRORS:
-            if needle in str(exc):
-                raise BoardStateError(message) from exc
-        raise BoardStateError(str(exc)) from exc
-
-
-def _claim(card_id, from_status, to_status):
-    if not research_task_service.claim_transition(card_id, from_status, to_status):
         raise BoardStateError(_CHANGED_MESSAGE)
 
 
@@ -197,64 +175,32 @@ def edit_card(project_name, card_id, data):
     return card_id
 
 
+def _status(project_name, card_id, action):
+    _user_tool(project_name, "update_task_status", {"task_id": card_id, "action": action})
+
+
 def approve(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("PROPOSED",))
-    prompt = (card["prompt_text"] or "").strip()
-    if not (card["title"] or "").strip():
-        raise ValueError("Add a title before approving.")
-    if card["research_method"] not in research_execution_service.RUNNABLE_METHODS:
-        raise ValueError("Choose how it runs before approving.")
-    if FALLBACK_MARKER in prompt:
-        raise ValueError("This prompt is a placeholder because drafting failed. Edit it, or re-draft it from the framework, before approving.")
-    if len(prompt) < MIN_PROMPT_CHARS:
-        raise ValueError("The research prompt is too short to send. Describe what the research should find out.")
-    if card["research_method"] == "SYNTHESIS" and not research_task_service.phase7_readiness(card["project_id"])["unlocked"]:
-        raise BoardStateError(research_execution_service.PHASE7_LOCKED_MESSAGE)
-    if not research_task_service.dependencies_satisfied(card_id):
-        raise BoardStateError(_FRIENDLY_TRANSITION_ERRORS[0][1])
-    # Only approve the exact card that was validated above; any edit since then wins.
-    if not research_work_items_repo.claim_status_if_unchanged(card_id, "PROPOSED", "READY", card["updated_at"]):
-        raise BoardStateError(_CHANGED_MESSAGE)
-    _record(project_name, "user_approve", card)
+    _status(project_name, card_id, "approve")
 
 
 def unapprove(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("READY",))
-    _claim(card_id, "READY", "PROPOSED")
-    _record(project_name, "user_unapprove", card)
+    _status(project_name, card_id, "back_to_draft")
 
 
 def skip(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("PROPOSED", "READY", "FAILED"))
-    _transition(card_id, "SKIPPED")
-    _record(project_name, "user_skip", card)
+    _status(project_name, card_id, "skip")
 
 
 def restore(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("SKIPPED",))
-    _transition(card_id, "PROPOSED")
-    _record(project_name, "user_restore", card)
+    _status(project_name, card_id, "restore")
 
 
 def retry(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("FAILED",))
-    _transition(card_id, "READY")
-    _record(project_name, "user_retry", card)
+    _status(project_name, card_id, "retry")
 
 
 def back_to_draft(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("READY", "FAILED"))
-    if card["status"] == "READY":
-        _claim(card_id, "READY", "PROPOSED")
-    else:
-        _transition(card_id, "PROPOSED")
-    _record(project_name, "user_back_to_draft", card)
+    _status(project_name, card_id, "back_to_draft")
 
 
 def redraft(project_name, card_id):
@@ -276,34 +222,15 @@ def redraft(project_name, card_id):
 
 
 def accept(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("WAITING_FOR_HUMAN",))
-    _transition(card_id, "COMPLETE")
-    _record(project_name, "user_accept", card)
+    _status(project_name, card_id, "accept")
 
 
 def needs_followup(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("WAITING_FOR_HUMAN",))
-    _transition(card_id, "REVIEWING")
-    _transition(card_id, "FOLLOW_UP_REQUIRED")
-    gaps = _json_text_list(card["identified_gaps_json"])
-    rationale = "You asked for a follow-up." + (f" Gaps found: {'; '.join(gaps)}" if gaps else "")
-    create_drafted_card(
-        project_name, card["phase_key"], f"Follow-up: {card['title']}",
-        research_method=(card["research_method"] if card["research_method"] in ("TARGETED_WEB", "FILE_ANALYSIS")
-                         else "TARGETED_WEB"),
-        focus=_focus(card) or None, rationale=rationale,
-        framework_key=card["framework_key"], suggested_from_work_item_id=card["id"],
-    )
-    _record(project_name, "user_needs_followup", card)
+    _status(project_name, card_id, "needs_followup")
 
 
 def mark_failed(project_name, card_id):
-    card = _card(project_name, card_id)
-    _require_status(card, ("WAITING_FOR_HUMAN",))
-    _transition(card_id, "FAILED")
-    _record(project_name, "user_mark_failed", card)
+    _status(project_name, card_id, "mark_failed")
 
 
 ACTIONS = {
