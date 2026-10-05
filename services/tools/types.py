@@ -24,3 +24,6 @@ def text_list(max_items, max_item_chars):
 
 
 Title = Text(200, min_chars=1)
+
+# A research card id: bounded so a huge integer is rejected as bad input, not passed to SQLite.
+CardId = Annotated[int, Field(ge=1, le=2**63 - 1)]

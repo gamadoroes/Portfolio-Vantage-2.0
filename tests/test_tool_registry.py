@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from db.repositories import projects_repo, research_work_items_repo, tool_calls_repo
 from services import tools
 from services.tools import registry
-from services.tools.types import Text, Title, ToolInput, text_list
+from services.tools.types import CardId, Text, Title, ToolInput, text_list
 
 
 class _Nested(BaseModel):
@@ -17,7 +17,7 @@ class _Nested(BaseModel):
 
 
 class _EchoInput(ToolInput):
-    task_id: int | None = None
+    task_id: CardId | None = None
     title: Title | None = None
     note: Text(10) = ""
     items: text_list(5, 40) = []
@@ -34,6 +34,12 @@ def _handler(ctx, inputs):
         raise RuntimeError("kaboom secret detail")
     if inputs.behaviour == "api":
         raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+    if inputs.behaviour == "validation":
+        _Nested.model_validate({})  # a pydantic ValidationError raised inside a handler
+    if inputs.behaviour == "badcode":
+        raise tools.ToolError("bogus", "never shown")
+    if inputs.behaviour == "json":
+        json.loads("{not json")
     if inputs.behaviour == "child":
         child = tools.run_tool("test_echo", ctx.caller, ctx.project_name, {"note": "kid"}, parent_call_id=ctx.call_id)
         return {"child_call_id": child.call_id}
@@ -151,3 +157,52 @@ def test_claude_schema_inlines_nested_models_and_keeps_a_title_field(echo):
     assert "title" in props                      # a field literally named "title" survives
     assert '"title"' in json.dumps(props["nested"])  # and so does the nested model's title field
     assert definition["name"] == "test_echo" and definition["description"] == "Echo for tests."
+
+
+def test_oversized_card_id_is_invalid_input_not_a_crash(pid):
+    result = tools.run_tool("test_echo", "user", "P", {"task_id": 10**30})
+    assert result.error["code"] == "invalid_input" and "task_id" in result.error["fields"]
+    assert _last_log(pid)["error_code"] == "invalid_input"
+
+
+def test_unexpected_failure_while_scoping_is_internal_and_the_log_row_is_finished(pid, monkeypatch):
+    def boom(_id):
+        raise RuntimeError("db exploded")
+
+    monkeypatch.setattr(research_work_items_repo, "get", boom)
+    result = tools.run_tool("test_echo", "user", "P", {"task_id": 1})
+    assert result.error["code"] == "internal" and "db exploded" not in result.error["message"]
+    log = _last_log(pid)
+    assert log["error_code"] == "internal" and log["duration_ms"] is not None
+    assert "RuntimeError" in log["error_message"]
+
+
+def test_a_logging_failure_after_success_does_not_report_a_false_failure(pid, monkeypatch, capsys):
+    real_finish = tool_calls_repo.finish
+
+    def finish(call_id, ok, **kwargs):
+        if ok:
+            raise RuntimeError("log write failed")
+        return real_finish(call_id, ok, **kwargs)
+
+    monkeypatch.setattr(tool_calls_repo, "finish", finish)
+    result = tools.run_tool("test_echo", "user", "P", {"note": "hi"})
+    assert result.ok and result.data["note"] == "hi"
+    assert "log write failed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("behaviour", ["validation", "badcode", "json"])
+def test_programming_or_data_errors_inside_a_handler_are_internal_not_conflict(pid, behaviour):
+    result = tools.run_tool("test_echo", "user", "P", {"behaviour": behaviour})
+    assert result.error["code"] == "internal"
+    assert result.error["message"] == "Something went wrong running test_echo."
+    assert _last_log(pid)["error_code"] == "internal"
+
+
+def test_register_rejects_an_id_field_that_is_not_on_the_input_model(temp_db):
+    with pytest.raises(ValueError, match="nope"):
+        tools.register(tools.Tool(
+            name="test_bad_ids", description="x", input_model=_EchoInput, handler=_handler,
+            callers=frozenset({"user"}), id_fields=("nope",),
+        ))
+    assert tools.get_tool("test_bad_ids") is None

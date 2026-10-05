@@ -28,7 +28,8 @@ class ToolError(Exception):
 
     def __init__(self, code, message, fields=None):
         if code not in ERROR_CODES:
-            raise ValueError(f"Unknown tool error code: {code}")
+            # TypeError, not ValueError: a bad code is a programming bug and must surface as `internal`.
+            raise TypeError(f"Unknown tool error code: {code}")
         super().__init__(message)
         self.code = code
         self.message = message
@@ -71,6 +72,9 @@ def register(tool):
         raise ValueError(f"Tool already registered: {tool.name}")
     if not (isinstance(tool.input_model, type) and issubclass(tool.input_model, BaseModel)):
         raise ValueError(f"{tool.name}: input_model must be a pydantic model")
+    unknown_ids = [n for n in tool.id_fields if n not in tool.input_model.model_fields]
+    if unknown_ids:  # a typo here would silently switch off project scoping
+        raise ValueError(f"{tool.name}: id_fields not on the input model: {unknown_ids}")
     _REGISTRY[tool.name] = tool
     return tool
 
@@ -136,15 +140,26 @@ def run_tool(name, caller, project_name, inputs=None, parent_call_id=None):
     call_id = tool_calls_repo.create(project_id, name, caller, clip_for_log(raw), parent_call_id=parent_call_id)
 
     def finish(ok, data=None, error=None, work_item_id=None, log_message=None):
-        tool_calls_repo.finish(
-            call_id, ok,
-            error_code=error["code"] if error else None,
-            error_message=(log_message or error["message"]) if error else None,
-            result_json=clip_for_log(data) if ok else None,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            research_work_item_id=work_item_id,
-        )
+        # Once the call row exists, run_tool never raises: a logging failure must not
+        # turn a finished (possibly paid) action into a reported failure, or vice versa.
+        try:
+            tool_calls_repo.finish(
+                call_id, ok,
+                error_code=error["code"] if error else None,
+                error_message=(log_message or error["message"]) if error else None,
+                result_json=clip_for_log(data) if ok else None,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                research_work_item_id=work_item_id,
+            )
+        except Exception as log_exc:
+            print(f"[tools] {name}: could not write the call log: {type(log_exc).__name__}: {log_exc}")
         return ToolResult(ok=ok, data=data if ok else None, error=error, call_id=call_id)
+
+    def internal(exc, work_item_id=None):
+        detail = f"{type(exc).__name__}: {exc}"
+        print(f"[tools] {name} failed: {detail}")
+        return finish(False, error=_error("internal", f"Something went wrong running {name}."),
+                      work_item_id=work_item_id, log_message=detail[:LOG_STRING_LIMIT])
 
     tool = _REGISTRY.get(name)
     if tool is None:
@@ -155,18 +170,22 @@ def run_tool(name, caller, project_name, inputs=None, parent_call_id=None):
         parsed = tool.input_model.model_validate(raw)
     except ValidationError as exc:
         return finish(False, error=_validation_error(exc))
+    except Exception as exc:
+        return internal(exc)
 
-    ids = _card_ids(tool, parsed)
-    for card_id in ids:
-        row = research_work_items_repo.get(card_id)
-        if row is None or row["project_id"] != project_id:
-            return finish(False, error=_error("not_found", f"No such research: {card_id}"))
+    try:
+        ids = _card_ids(tool, parsed)
+        for card_id in ids:
+            row = research_work_items_repo.get(card_id)
+            if row is None or row["project_id"] != project_id:
+                return finish(False, error=_error("not_found", f"No such research: {card_id}"))
+    except Exception as exc:
+        return internal(exc)
     work_item_id = ids[0] if len(ids) == 1 else None
 
     ctx = ToolContext(project_name=project_name, project_id=project_id, caller=caller, call_id=call_id)
     try:
         data = tool.handler(ctx, parsed) or {}
-        return finish(True, data=data, work_item_id=work_item_id)
     except ToolError as exc:
         return finish(False, error=_error(exc.code, exc.message, exc.fields), work_item_id=work_item_id)
     except (anthropic.APIError, openai.APIError) as exc:
@@ -174,10 +193,11 @@ def run_tool(name, caller, project_name, inputs=None, parent_call_id=None):
         print(f"[tools] {name}: outside service error: {detail}")
         return finish(False, error=_error("unavailable", f"{name} could not reach an outside service just now. Try again shortly."),
                       work_item_id=work_item_id, log_message=detail[:LOG_STRING_LIMIT])
+    except (ValidationError, json.JSONDecodeError, UnicodeError) as exc:
+        # These are ValueErrors too, but they are bugs or bad data, not "the card is in the wrong state".
+        return internal(exc, work_item_id)
     except ValueError as exc:  # the services raise ValueError when a card is not in a state that allows the action
         return finish(False, error=_error("conflict", str(exc)), work_item_id=work_item_id)
     except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"
-        print(f"[tools] {name} failed: {detail}")
-        return finish(False, error=_error("internal", f"Something went wrong running {name}."),
-                      work_item_id=work_item_id, log_message=detail[:LOG_STRING_LIMIT])
+        return internal(exc, work_item_id)
+    return finish(True, data=data, work_item_id=work_item_id)
