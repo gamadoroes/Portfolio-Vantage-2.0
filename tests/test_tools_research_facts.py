@@ -131,3 +131,45 @@ def test_the_options_report_is_not_mined_for_facts(pid):
 @pytest.mark.parametrize("caller", ["user", "system"])
 def test_only_the_supervisor_records_a_batch(pid, caller):
     assert _record(_card(pid), [FACT], caller=caller).error["code"] == "not_allowed"
+
+
+def test_a_rejected_claim_with_a_bad_address_is_skipped_once_and_not_called_saved(pid):
+    card = _card(pid)
+    (fact_id,) = _record(card, [FACT]).data["fact_ids"]
+    tools.run_tool("update_evidence_status", "user", "P", {"kind": "fact", "id": fact_id, "action": "reject"})
+    result = _record(card, [dict(FACT, source_url="javascript:alert(1)")]).data
+    assert result["skipped"] == [{"item": "fact 1", "reason": "It matches a fact you rejected.", "saved": False}]
+
+
+def _break(monkeypatch, name):
+    def boom(ctx, inputs):
+        raise RuntimeError("secret detail")
+    monkeypatch.setattr(tools.get_tool(name), "handler", boom)
+
+
+def test_a_failing_save_gives_a_plain_reason_and_the_batch_carries_on(pid, monkeypatch):
+    _break(monkeypatch, "save_evidence")
+    result = _record(_card(pid), [FACT, FACT2]).data
+    assert result["fact_ids"] == []
+    assert result["skipped"] == [{"item": f"fact {n}", "reason": "It could not be saved.", "saved": False}
+                                 for n in (1, 2)]
+
+
+def test_a_failing_conclusion_is_skipped_plainly_and_its_facts_stay_saved(pid, monkeypatch):
+    _break(monkeypatch, "create_finding")
+    result = _record(_card(pid), [FACT], [{"text": "Pricey", "fact_numbers": [1]}]).data
+    assert len(result["fact_ids"]) == 1 and result["conclusion_ids"] == []
+    assert result["skipped"] == [{"item": "conclusion 1", "reason": "It could not be saved.", "saved": False}]
+
+
+def test_a_non_object_conclusion_is_skipped_and_the_others_are_saved(pid):
+    result = _record(_card(pid), [FACT], ["x", {"text": "Pricey", "fact_numbers": [1]}]).data
+    assert len(result["conclusion_ids"]) == 1
+    assert result["skipped"] == [{"item": "conclusion 1", "reason": "It has no text.", "saved": False}]
+
+
+def test_zero_and_negative_fact_numbers_are_ignored(pid):
+    result = _record(_card(pid), [FACT, FACT2], [{"text": "Second only", "fact_numbers": "-1, 0, fact 2"}]).data
+    (conclusion_id,) = result["conclusion_ids"]
+    links = evidence_repo.conclusion_fact_links(pid)[conclusion_id]
+    assert [fact_id for fact_id, _ in links] == [result["fact_ids"][1]]

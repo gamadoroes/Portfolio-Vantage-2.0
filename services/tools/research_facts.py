@@ -31,6 +31,7 @@ REJECTED = "It matches a fact you rejected."
 NO_TEXT = "It has no text."
 NO_FACTS_LEFT = "None of the facts it cites were saved."
 BAD_ADDRESS = "Saved without its source: the address does not start with http:// or https://."
+NOT_SAVED = "It could not be saved."
 
 
 def as_object_list(value):
@@ -54,7 +55,7 @@ def _numbers(value):
     if isinstance(value, float):
         return [int(value)] if value.is_integer() else []
     if isinstance(value, str):
-        return [int(n) for n in re.findall(r"\d+", value)]
+        return [n for n in (int(m) for m in re.findall(r"(?<![-\d])\d+", value)) if n >= 1]
     if isinstance(value, (list, tuple)):
         return [n for item in value if not isinstance(item, (list, tuple)) for n in _numbers(item)]
     return []
@@ -107,6 +108,14 @@ def _skip(skipped, item, reason, saved=False):
     skipped.append({"item": item, "reason": reason, "saved": saved})
 
 
+def _plain_reason(failed):
+    """A reason a person can read for a failed child call: only conflict and not_found messages are written for
+    people; anything else would leak a tool or field name."""
+    if failed.error["code"] in ("conflict", "not_found"):
+        return failed.error["message"]
+    return NOT_SAVED
+
+
 def _save_fact(ctx, task_id, run_id, number, fact, skipped):
     """The fact's id if it was saved (or already known and active), else None. Adds to skipped as needed."""
     item = f"fact {number}"
@@ -114,9 +123,10 @@ def _save_fact(ctx, task_id, run_id, number, fact, skipped):
         _skip(skipped, item, NO_CLAIM)
         return None
     source_id = None
+    source_note = None  # reported only if the fact itself ends up saved
     if fact.source_url:
         if not is_web_address(fact.source_url):
-            _skip(skipped, item, BAD_ADDRESS, saved=True)
+            source_note = BAD_ADDRESS
         else:
             source = _call(ctx, "save_source", {
                 "url": fact.source_url, "title": fact.source_title or fact.source_url[:SOURCE_TITLE_CHARS],
@@ -125,15 +135,17 @@ def _save_fact(ctx, task_id, run_id, number, fact, skipped):
             if source.ok:
                 source_id = source.data["source_id"]
             else:
-                _skip(skipped, item, f"Saved without its source: {source.error['message']}", saved=True)
+                source_note = f"Saved without its source: {_plain_reason(source)}"
     saved = _call(ctx, "save_evidence", {"task_id": task_id, "claim": fact.claim, "quote": fact.quote,
                                          "source_id": source_id, "as_of": fact.as_of, "run_id": run_id})
     if not saved.ok:
-        _skip(skipped, item, saved.error["message"])
+        _skip(skipped, item, _plain_reason(saved))
         return None
     if saved.data["status"] != "active":
         _skip(skipped, item, REJECTED)
         return None
+    if source_note:
+        _skip(skipped, item, source_note, saved=True)
     return saved.data["fact_id"]
 
 
@@ -165,7 +177,7 @@ def record_research_facts(ctx, inputs):
         if made.ok:
             conclusion_ids.append(made.data["conclusion_id"])
         else:
-            _skip(skipped, item, made.error["message"])
+            _skip(skipped, item, _plain_reason(made))
     return {"fact_ids": fact_ids, "conclusion_ids": conclusion_ids, "skipped": skipped}
 
 
