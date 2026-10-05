@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
+from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 from services import board_service, research_execution_service, research_task_service, tools
 
 PROMPT = "Research the fee structures of every online Psychology postgraduate program in Australia."
@@ -95,3 +95,26 @@ def test_board_run_treats_an_unknown_card_as_not_ready(pid, monkeypatch):
     card = _ready(pid)
     result = board_service.run("P", [99999, card])
     assert result == {"started": [card], "not_ready": [99999], "failed": []}
+
+
+def test_board_run_starts_more_than_twenty_cards(pid, monkeypatch):
+    _fake_openai(monkeypatch)
+    cards = [_ready(pid) for _ in range(21)]
+    assert board_service.run("P", cards)["started"] == cards
+
+
+def test_board_run_keeps_started_runs_when_a_later_part_fails(pid, monkeypatch):
+    _fake_openai(monkeypatch)
+    web = _ready(pid)
+    synth = _ready(pid, method="SYNTHESIS", phase="7")
+    real = tools.run_tool
+
+    def flaky(name, *args, **kwargs):
+        if name == "generate_synthesis":
+            return tools.ToolResult(ok=False, error={"code": "internal", "message": "boom", "fields": []})
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(board_service, "run_tool", flaky)
+    result = board_service.run("P", [web, synth])
+    assert result == {"started": [web], "not_ready": [], "failed": [{"id": synth, "error": "boom"}]}
+    assert any(d["decision_type"] == "user_run" for d in agent_decisions_repo.list_for_project(pid, limit=10))

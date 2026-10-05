@@ -17,12 +17,16 @@ from services import (
 GOOD_PROMPT = "Research the fee structures of every online Psychology postgraduate program."
 
 
+def _no_openai(*args, **kwargs):
+    raise AssertionError("tests must not call OpenAI")
+
+
 @pytest.fixture
 def pid(temp_db, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(llm_service, "prompt_completion",
                         lambda system, user, max_tokens=4000: "ROLE: analyst. A complete drafted research prompt for this card.")
-    monkeypatch.setattr(research_execution_service, "sync_web_research_runs", lambda project_name: None)
+    monkeypatch.setattr(research_execution_service.openai_service, "retrieve_deep_research", _no_openai)
     return projects_repo.get_or_create_id("P")
 
 

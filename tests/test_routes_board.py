@@ -11,6 +11,10 @@ from services import llm_service, research_execution_service, research_task_serv
 GOOD_PROMPT = "Research the fee structures of every online Psychology postgraduate program."
 
 
+def _no_openai(*args, **kwargs):
+    raise AssertionError("tests must not call OpenAI")
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -18,7 +22,7 @@ def client(tmp_path, monkeypatch):
     apply_migrations()
     monkeypatch.setattr(llm_service, "prompt_completion",
                         lambda system, user, max_tokens=4000: "ROLE: analyst. A complete drafted research prompt for this card.")
-    monkeypatch.setattr(research_execution_service, "sync_web_research_runs", lambda project_name: None)
+    monkeypatch.setattr(research_execution_service.openai_service, "retrieve_deep_research", _no_openai)
     flask_app = create_app()
     flask_app.config["TESTING"] = True
     with flask_app.test_client() as c:
@@ -148,3 +152,13 @@ def test_refresh(client):
     body = client.post("/api/board/refresh", json={"project": "P", "defer_linking": True}).get_json()
     assert body["success"] is True
     assert body["board"]["linked_reports"] == 0
+
+
+def test_run_starts_more_than_twenty_cards(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(research_execution_service.openai_service, "start_deep_research",
+                        lambda prompt: calls.append(prompt) or SimpleNamespace(id=f"resp_{len(calls)}", status="queued"))
+    ids = [_card(status="READY") for _ in range(21)]
+    resp = client.post("/api/board/run", json={"project": "P", "card_ids": ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["result"]["started"] == ids

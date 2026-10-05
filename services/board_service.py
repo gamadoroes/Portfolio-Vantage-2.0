@@ -36,6 +36,7 @@ USER_METHODS = ("TARGETED_WEB", "FILE_ANALYSIS")
 EDITABLE_STATUSES = ("PROPOSED", "READY")
 OPEN_STATUSES = ("PROPOSED", "READY", "RUNNING", "REVIEWING")
 OPTIONS_REPORT_TITLE = "Options for OES report"
+LAUNCH_BATCH = 20  # launch_deep_research takes at most this many cards per call
 
 
 class CardNotFound(LookupError):
@@ -268,12 +269,17 @@ def run(project_name, card_ids):
             result["not_ready"].append(card_id)
         else:
             (synthesis if row["research_method"] == "SYNTHESIS" else others).append(card_id)
-    parts = ([_user_tool(project_name, "launch_deep_research", {"task_ids": others})] if others else []) + [
-        _user_tool(project_name, "generate_synthesis", {"task_id": card_id}) for card_id in synthesis
-    ]
-    for part in parts:
-        for key in result:
-            result[key].extend(part[key])
+    parts = [("launch_deep_research", {"task_ids": others[i:i + LAUNCH_BATCH]}, others[i:i + LAUNCH_BATCH])
+             for i in range(0, len(others), LAUNCH_BATCH)]
+    parts += [("generate_synthesis", {"task_id": card_id}, [card_id]) for card_id in synthesis]
+    for name, inputs, part_ids in parts:
+        # A part that fails must not hide runs an earlier part already started (and paid for).
+        outcome = run_tool(name, "user", project_name, inputs)
+        if outcome.ok:
+            for key in result:
+                result[key].extend(outcome.data[key])
+        else:
+            result["failed"].extend({"id": card_id, "error": outcome.error["message"]} for card_id in part_ids)
     if result["started"]:
         _record(project_name, "user_run", count=len(result["started"]))
     return result
