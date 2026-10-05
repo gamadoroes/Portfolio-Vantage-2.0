@@ -1,6 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..connection import get_connection
+
+# How long a fact-extraction claim may sit with no facts saved before it is treated as a crashed call.
+STALE_EXTRACTION_MINUTES = 15
 
 
 def create(id, project_id, response_id, chat_session_id, prompt_preview, status="running"):
@@ -55,3 +58,26 @@ def find_latest_for_work_item(work_item_id):
             "ORDER BY created_at DESC LIMIT 1",
             (work_item_id,),
         ).fetchone()
+
+
+def claim_facts_extraction(id):
+    """Mark this run's report as mined for facts. True only for the call that set it, so a
+    double-click (or two tabs) cannot pay for the same report twice.
+
+    A claim older than STALE_EXTRACTION_MINUTES that produced no fact is taken to be a call that died
+    with the process, and can be claimed again."""
+    now = datetime.now()
+    cutoff = (now - timedelta(minutes=STALE_EXTRACTION_MINUTES)).isoformat()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE research_runs SET facts_extracted_at = ? WHERE id = ? AND (facts_extracted_at IS NULL "
+            "OR (facts_extracted_at < ? AND NOT EXISTS (SELECT 1 FROM facts WHERE run_id = ?)))",
+            (now.isoformat(), id, cutoff, id),
+        )
+        return cur.rowcount == 1
+
+
+def release_facts_extraction(id):
+    """Undo a claim when nothing was taken from the report, so the person can try again."""
+    with get_connection() as conn:
+        conn.execute("UPDATE research_runs SET facts_extracted_at = NULL WHERE id = ?", (id,))

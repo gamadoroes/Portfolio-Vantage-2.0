@@ -24,7 +24,7 @@ def test_apply_migrations_is_idempotent(temp_db):
     apply_migrations()
     with get_connection() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
-    assert count == 6
+    assert count == 7
 
 
 def test_agent_decisions_and_research_runs_schema(temp_db):
@@ -118,3 +118,17 @@ def test_tool_calls_table(temp_db):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tool_calls)").fetchall()}
     assert {"id", "project_id", "tool", "caller", "research_work_item_id", "parent_call_id", "input_json",
             "ok", "error_code", "error_message", "result_json", "started_at", "duration_ms"}.issubset(cols)
+
+
+def test_evidence_tables(temp_db):
+    with get_connection() as conn:
+        def cols(table):
+            return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+        assert {"id", "project_id", "url", "title", "publisher", "published_date", "created_at"} <= cols("cited_sources")
+        assert {"id", "project_id", "phase_key", "claim", "claim_key", "quote", "cited_source_id", "as_of",
+                "research_work_item_id", "run_id", "status", "created_at", "updated_at"} <= cols("facts")
+        assert {"id", "project_id", "phase_key", "text", "research_work_item_id", "status",
+                "created_at", "updated_at"} <= cols("conclusions")
+        assert {"conclusion_id", "fact_id"} <= cols("conclusion_facts")
+        assert "facts_extracted_at" in cols("research_runs")
