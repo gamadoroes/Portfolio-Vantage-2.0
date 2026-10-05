@@ -22,6 +22,11 @@ EXPECTED_CALLERS = {
     "launch_deep_research": {"user"},
     "check_research_run": {"system"},
     "generate_synthesis": {"user"},
+    "save_source": {"supervisor", "system"},
+    "save_evidence": {"supervisor", "system"},
+    "create_finding": {"supervisor", "system"},
+    "search_existing_evidence": {"supervisor", "user", "system"},
+    "update_evidence_status": {"user"},
 }
 
 
