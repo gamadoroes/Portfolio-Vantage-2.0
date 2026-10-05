@@ -236,8 +236,9 @@ def _format_web_research_output(text, citations):
 def sync_web_research_runs(project_name):
     """Pull the outcome of TARGETED_WEB runs from OpenAI into research_runs.
 
-    Done by the supervisor itself on every cycle, so web research completes and becomes
-    reviewable without a browser tab open (the browser poller only ever saves a status).
+    Called by the Research board's refresh (board_service.refresh), so a finished web run
+    gets its report text saved and becomes reviewable. The legacy browser poller only ever
+    saves a status, never the text.
     """
     project_id = projects_repo.get_or_create_id(project_name)
     for item in research_work_items_repo.list_for_project(project_id):
@@ -246,8 +247,8 @@ def sync_web_research_runs(project_name):
             continue
         try:
             response = openai_service.retrieve_deep_research(run["response_id"])
-        except Exception as exc:  # one flaky lookup must not block the whole cycle
-            print(f"[supervisor] could not check web research run {run['id']}: {exc}")
+        except Exception as exc:  # one flaky lookup must not block the whole refresh
+            print(f"[board] could not check web research run {run['id']}: {exc}")
             continue
 
         status = getattr(response, "status", None)
@@ -267,7 +268,7 @@ def sync_web_research_runs(project_name):
             research_run_service.fail_run(
                 project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
             )
-        # queued / in_progress: still working; checked again next cycle.
+        # queued / in_progress: still working; checked again on the next refresh.
 
 
 METHOD_LABELS = {"TARGETED_WEB": "Web research", "FILE_ANALYSIS": "My files", "SYNTHESIS": "Options report"}
