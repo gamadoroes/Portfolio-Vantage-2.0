@@ -18,10 +18,10 @@ Measured on 8 of the real stored deep-research reports (Oct 2026):
 
 Today the supervisor sees at most **8,000 characters** of a task's output: a deduplicated source list (~1.5k) followed by the *start* of the report (~6.4k). That is about **12%** of a typical report. At most 24,000 characters are shown across all tasks awaiting review in one cycle, inside an overall 60,000-character context cap.
 
-Where the limits live (`services/supervisor_service.py`):
-- `MAX_RUN_OUTPUT_REVIEW_CHARS` = 8000 (per task awaiting review)
-- `MAX_REVIEW_OUTPUT_TOTAL_CHARS` = 24000 (all tasks awaiting review, per cycle)
-- `MAX_CONTEXT_CHARS` = 60000 (whole context)
+Where the limits live:
+- `MAX_RUN_OUTPUT_REVIEW_CHARS` = 8000 (per task awaiting review, in `services/review_limits.py`)
+- `MAX_REVIEW_OUTPUT_TOTAL_CHARS` = 24000 (all tasks awaiting review, per cycle, in `services/review_limits.py`)
+- `MAX_CONTEXT_CHARS` = 60000 (whole context, in `services/review_limits.py`)
 - `MAX_WEB_SOURCES_LISTED` = 20 (now in `services/research_execution_service.py`, value unchanged)
 
 ### Planned test (in this order)

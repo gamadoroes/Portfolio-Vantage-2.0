@@ -11,24 +11,20 @@ from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
 from .prompt_drafting_service import create_drafted_card
 from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase, resolve_framework
+from .review_limits import (
+    MAX_CONTEXT_CHARS,
+    MAX_REVIEW_OUTPUT_TOTAL_CHARS,
+    MAX_RUN_OUTPUT_PREVIEW_CHARS,
+    MAX_RUN_OUTPUT_REVIEW_CHARS,
+)
+from .text_utils import as_text_list, clip_text
 
-MAX_CONTEXT_CHARS = 60000
-# A task awaiting review needs enough of its run output for the supervisor to
-# score completeness/evidence; every other task only needs a short reminder.
-MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
-MAX_RUN_OUTPUT_REVIEW_CHARS = 8000
-MAX_REVIEW_OUTPUT_TOTAL_CHARS = 24000
 # Each task line also carries what the card is about, kept short.
 MAX_FOCUS_CHARS = 150
 MAX_RATIONALE_CHARS = 200
 MAX_GAPS_CHARS = 300
 
-
-def _clip_run_output(text, limit):
-    text = text if isinstance(text, str) else str(text or "")
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "...[truncated]"
+_clip_run_output = clip_text  # existing call sites keep their name
 
 
 def _awaiting_review(item, run):
@@ -44,22 +40,6 @@ def _one_line(text, limit):
     """Flatten text onto one line (quotes made single) and clip it, for a task line."""
     flattened = " ".join(str(text or "").split()).replace('"', "'")
     return _clip_run_output(flattened, limit)
-
-
-def as_text_list(value):
-    """A list of non-empty strings from a field that should be a list.
-
-    The tool schemas ask for arrays, but the live model sometimes sends one string instead,
-    often a bulleted block ("\\n- first\\n- second"). Split that into its lines.
-    """
-    if value is None:
-        return []
-    if isinstance(value, str):
-        lines = (line.strip().lstrip("-*•").strip() for line in value.splitlines())
-        return [line for line in lines if line]
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return [str(value)]
 
 
 def _json_list(value):

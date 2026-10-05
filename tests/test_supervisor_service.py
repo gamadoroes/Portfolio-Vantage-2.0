@@ -503,3 +503,14 @@ def test_follow_up_focus_sent_as_a_string_is_stored_as_a_list(temp_db, app_conte
     result = supervisor_service.review_card("P", card_id)
     follow = research_work_items_repo.get(result["followup_card_id"])
     assert json.loads(follow["entities_json"]) == ["Intakes"]
+
+
+def test_helpers_and_limits_moved_without_changing_values():
+    from services import review_limits, text_utils
+    assert supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS == review_limits.MAX_RUN_OUTPUT_REVIEW_CHARS == 8000
+    assert supervisor_service.MAX_REVIEW_OUTPUT_TOTAL_CHARS == 24000
+    assert supervisor_service.MAX_CONTEXT_CHARS == 60000
+    assert supervisor_service.MAX_RUN_OUTPUT_PREVIEW_CHARS == 300
+    assert supervisor_service.as_text_list is text_utils.as_text_list
+    assert text_utils.clip_text("abcdef", 3) == "abc...[truncated]"
+    assert text_utils.clip_text("abc", 3) == "abc"

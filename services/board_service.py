@@ -26,6 +26,7 @@ from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt, save_project_prompt
 from .prompt_drafting_service import FALLBACK_MARKER, create_drafted_card, draft_prompt
 from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase, resolve_framework
+from .text_utils import as_text_list
 
 MIN_PROMPT_CHARS = 40
 STALE_REVIEW_CLAIM_SECONDS = 600
@@ -112,7 +113,7 @@ def _json_text_list(raw):
         value = json.loads(raw) if raw else []
     except ValueError:
         return []
-    return supervisor_service.as_text_list(value)
+    return as_text_list(value)
 
 
 def _focus(card):
