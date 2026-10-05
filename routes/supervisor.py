@@ -4,7 +4,6 @@ from flask import Blueprint, jsonify, request, session
 
 from db.repositories import agent_decisions_repo, projects_repo
 from services.project_service import normalize_project_name, project_exists
-from services.supervisor_service import run_supervisor_cycle
 
 supervisor_bp = Blueprint("supervisor", __name__)
 
@@ -18,17 +17,10 @@ def _existing_project_name(raw_project):
 
 @supervisor_bp.route("/api/supervisor/run", methods=["POST"])
 def run_supervisor_route():
-    data = request.get_json(silent=True) or {}
-    project = _existing_project_name(data.get("project") or session.get("current_project"))
-    if not project:
-        return jsonify({"success": False, "error": "No project"}), 400
-
-    try:
-        result = run_supervisor_cycle(project)
-    except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
-
-    return jsonify(result)
+    return jsonify({
+        "success": False,
+        "error": "The Supervisor now runs from the Research tab. It drafts and reviews; you approve and run.",
+    }), 410
 
 
 @supervisor_bp.route("/api/supervisor/decisions", methods=["GET"])

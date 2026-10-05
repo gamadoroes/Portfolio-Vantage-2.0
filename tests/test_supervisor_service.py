@@ -1,7 +1,15 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
-from services import insights_service, project_service, supervisor_service
+from services import insights_service, llm_service, project_service, research_task_service, supervisor_service
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
 
 
 def test_build_context_includes_objective(temp_db):
@@ -184,557 +192,236 @@ def test_build_context_does_not_leak_other_projects(temp_db):
     assert "P1-only task" not in context2
 
 
-def test_tool_schemas_has_nine_tools_with_correct_names():
-    names = {schema["name"] for schema in supervisor_service.TOOL_SCHEMAS}
-    assert names == {
-        "propose_tasks", "mark_ready", "dispatch_task", "review_outcome",
-        "create_followup_task", "request_human_review", "skip_task",
-        "trigger_synthesis", "no_action",
-    }
 
-
-def test_handle_mark_ready_transitions_to_ready(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    result = supervisor_service.handle_mark_ready("P", {"task_id": task_id, "reason": "deps satisfied"})
-    assert result["new_status"] == "READY"
-    assert research_work_items_repo.get(task_id)["status"] == "READY"
-
-
-def test_handle_mark_ready_raises_on_illegal_transition(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    research_work_items_repo.update_fields(task_id, status="COMPLETE")
-    with pytest.raises(ValueError):
-        supervisor_service.handle_mark_ready("P", {"task_id": task_id, "reason": "x"})
-
-
-def test_handle_skip_task_transitions_to_skipped(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    result = supervisor_service.handle_skip_task("P", {"task_id": task_id, "reason": "no longer useful"})
-    assert result["new_status"] == "SKIPPED"
-    assert research_work_items_repo.get(task_id)["status"] == "SKIPPED"
-
-
-def test_handle_no_action_is_a_noop(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    result = supervisor_service.handle_no_action("P", {"reason": "nothing ready"})
-    assert "message" in result
-    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"  # untouched
-
-
-def test_handle_request_human_review_sets_flag_only_when_not_reviewing(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")  # status PROPOSED
-    result = supervisor_service.handle_request_human_review("P", {"task_id": task_id, "reason": "uncertain"})
-    row = research_work_items_repo.get(task_id)
-    assert row["human_review_required"] == 1
-    assert row["status"] == "PROPOSED"  # unchanged, since it wasn't REVIEWING
-    assert result["flagged_only"] is True
-
-
-def test_handle_request_human_review_transitions_when_reviewing(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    research_work_items_repo.update_fields(task_id, status="REVIEWING")
-    result = supervisor_service.handle_request_human_review("P", {"task_id": task_id, "reason": "uncertain"})
-    row = research_work_items_repo.get(task_id)
-    assert row["human_review_required"] == 1
-    assert row["status"] == "WAITING_FOR_HUMAN"
-    assert result["new_status"] == "WAITING_FOR_HUMAN"
-
-
-def test_handle_request_human_review_raises_for_unknown_task(temp_db):
-    with pytest.raises(ValueError):
-        supervisor_service.handle_request_human_review("P", {"task_id": 9999, "reason": "x"})
-
-
-def test_handle_propose_tasks_creates_tasks(temp_db):
-    projects_repo.get_or_create_id("P")
-    result = supervisor_service.handle_propose_tasks("P", {
-        "tasks": [{"phase_key": "4", "title": "Product / La Trobe"}],
-        "reason": "initial plan",
-    })
-    assert len(result["created_task_ids"]) == 1
-    row = research_work_items_repo.get(result["created_task_ids"][0])
-    assert row["title"] == "Product / La Trobe"
-    assert row["status"] == "PROPOSED"
-
-
-def test_handle_propose_tasks_wires_existing_id_dependency(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    existing_id = research_work_items_repo.create(pid, "1", "Landscape task")
-    result = supervisor_service.handle_propose_tasks("P", {
-        "tasks": [{"phase_key": "4", "title": "Dependent task", "depends_on_existing_ids": [existing_id]}],
-        "reason": "needs landscape first",
-    })
-    new_id = result["created_task_ids"][0]
-    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(new_id)]
-    assert deps == [existing_id]
-
-
-def test_handle_propose_tasks_wires_batch_index_dependency_to_real_id(temp_db):
-    projects_repo.get_or_create_id("P")
-    result = supervisor_service.handle_propose_tasks("P", {
-        "tasks": [
-            {"phase_key": "4", "title": "Depends on second task", "depends_on_batch_indices": [1]},
-            {"phase_key": "4", "title": "The second task"},
-        ],
-        "reason": "ordering matters",
-    })
-    first_id, second_id = result["created_task_ids"]
-    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(first_id)]
-    # Must be the SECOND task's real database id -- not the literal index "1".
-    assert deps == [second_id]
-
-
-def test_handle_propose_tasks_cycle_raises_value_error(temp_db):
-    # Two tasks in the SAME batch mutually depending on each other via
-    # batch indices is a genuine cycle: the handler creates both tasks
-    # first, then wires dependencies in array order. Wiring task 0 -> task 1
-    # succeeds (no edges exist yet); wiring task 1 -> task 0 immediately
-    # after closes a real two-node cycle, since task 0 already depends on
-    # task 1 at that point.
-    projects_repo.get_or_create_id("P")
-    with pytest.raises(ValueError, match="cycle"):
-        supervisor_service.handle_propose_tasks("P", {
-            "tasks": [
-                {"phase_key": "4", "title": "X", "depends_on_batch_indices": [1]},
-                {"phase_key": "4", "title": "Y", "depends_on_batch_indices": [0]},
-            ],
-            "reason": "mutually dependent tasks",
-        })
-
-
-def test_handle_propose_tasks_out_of_range_batch_index_raises_value_error(temp_db):
-    projects_repo.get_or_create_id("P")
-    with pytest.raises(ValueError):
-        supervisor_service.handle_propose_tasks("P", {
-            "tasks": [{"phase_key": "4", "title": "X", "depends_on_batch_indices": [5]}],
-            "reason": "bad index",
-        })
-
-
-def test_handle_create_followup_task_marks_original_and_creates_dependency(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    original_id = research_work_items_repo.create(pid, "4", "Product / Torrens")
-    research_work_items_repo.update_fields(original_id, status="REVIEWING")
-
-    result = supervisor_service.handle_create_followup_task("P", {
-        "task_id": original_id,
-        "followup_title": "Verify Torrens tuition fee from official source",
-        "followup_objective": "Find an authoritative source for the current tuition fee.",
-        "research_method": "TARGETED_WEB",
-        "priority": "high",
-        "reason": "Current fee was not from an authoritative source.",
-    })
-
-    original_row = research_work_items_repo.get(original_id)
-    assert original_row["status"] == "FOLLOW_UP_REQUIRED"
-
-    followup_id = result["followup_task_id"]
-    followup_row = research_work_items_repo.get(followup_id)
-    assert followup_row["title"] == "Verify Torrens tuition fee from official source"
-    assert followup_row["phase_key"] == "4"
-
-    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(original_id)]
-    assert deps == [followup_id]
-
-
-def test_handle_create_followup_task_raises_for_unknown_task(temp_db):
-    with pytest.raises(ValueError):
-        supervisor_service.handle_create_followup_task("P", {
-            "task_id": 9999, "followup_title": "x", "reason": "x",
-        })
-
-
-def test_handle_create_followup_task_works_after_review_outcome_already_marked_follow_up(temp_db):
-    # The supervisor's own sequence: review_outcome(FOLLOW_UP_REQUIRED) moves the
-    # task straight to FOLLOW_UP_REQUIRED, and the next cycle then asks for the
-    # follow-up task. Nothing in that flow ever leaves a task in REVIEWING.
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="completed")
-    supervisor_service.handle_review_outcome("P", {
-        "task_id": task_id, "outcome": "FOLLOW_UP_REQUIRED", "reason": "weak evidence",
-    })
-
-    result = supervisor_service.handle_create_followup_task("P", {
-        "task_id": task_id, "followup_title": "Find an authoritative source", "reason": "close the gap",
-    })
-
-    assert research_work_items_repo.get(task_id)["status"] == "FOLLOW_UP_REQUIRED"
-    deps = [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(task_id)]
-    assert deps == [result["followup_task_id"]]
-
-
-def test_handle_create_followup_task_refuses_a_task_that_was_never_reviewed(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="completed")  # RUNNING, not yet reviewed
-
-    with pytest.raises(ValueError):
-        supervisor_service.handle_create_followup_task("P", {
-            "task_id": task_id, "followup_title": "Premature follow-up", "reason": "x",
-        })
-
-    assert [row["id"] for row in research_work_items_repo.list_for_project(pid)] == [task_id]
-
-
-def test_handle_dispatch_task_file_analysis_completes_synchronously(temp_db, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    from services import project_service
-    project_service.create_project("P")
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
-    research_work_items_repo.update_fields(task_id, status="READY")
-
-    monkeypatch.setattr(
-        supervisor_service.llm_service, "prompt_completion",
-        lambda system_prompt, user_message, max_tokens=3000: "The fee is $40,000.",
-    )
-
-    result = supervisor_service.handle_dispatch_task("P", {
-        "task_id": task_id, "research_method": "FILE_ANALYSIS", "reason": "files are available",
-    })
-
-    assert result["status"] == "completed"
-    task_row = research_work_items_repo.get(task_id)
-    assert task_row["status"] == "RUNNING"  # dispatch never reviews -- that's a separate call
-    run = research_runs_repo.find_latest_for_work_item(task_id)
-    assert run["status"] == "completed"
-    assert run["output_text"] == "The fee is $40,000."
-
-
-def test_handle_dispatch_task_targeted_web_starts_async_job(temp_db, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    from services import project_service
-    project_service.create_project("P")
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
-    research_work_items_repo.update_fields(task_id, status="READY")
-
-    class FakeResponse:
-        id = "resp_123"
-        status = "queued"
-
-    monkeypatch.setattr(
-        supervisor_service.openai_service, "start_deep_research",
-        lambda prompt: FakeResponse(),
-    )
-
-    result = supervisor_service.handle_dispatch_task("P", {
-        "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "needs live web data",
-    })
-
-    assert result["status"] == "running"
-    task_row = research_work_items_repo.get(task_id)
-    assert task_row["status"] == "RUNNING"
-    run = research_runs_repo.find_latest_for_work_item(task_id)
-    assert run["status"] == "running"
-    assert run["response_id"] == "resp_123"
-
-
-def test_handle_dispatch_task_raises_for_unknown_task(temp_db):
-    with pytest.raises(ValueError):
-        supervisor_service.handle_dispatch_task("P", {
-            "task_id": 9999, "research_method": "FILE_ANALYSIS", "reason": "x",
-        })
-
-
-def _ready_task_in_real_project(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    from services import project_service
-    project_service.create_project("P")
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task", objective="Find the tuition fee.")
-    research_work_items_repo.update_fields(task_id, status="READY")
-    return task_id
-
-
-def _assert_dispatch_failure_left_nothing_stranded(task_id, message):
-    assert research_work_items_repo.get(task_id)["status"] == "FAILED"
-    run = research_runs_repo.find_latest_for_work_item(task_id)
-    assert run["status"] == "failed"
-    assert message in run["error"]
-
-
-def test_handle_dispatch_task_targeted_web_start_failure_fails_the_task_and_run(temp_db, tmp_path, monkeypatch):
-    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
-
-    def outage(prompt):
-        raise RuntimeError("OpenAI is down")
-
-    monkeypatch.setattr(supervisor_service.openai_service, "start_deep_research", outage)
-
-    # A ValueError (not the raw RuntimeError) is what lets run_supervisor_cycle
-    # record the failure as a decision instead of dropping it.
-    with pytest.raises(ValueError, match="OpenAI is down"):
-        supervisor_service.handle_dispatch_task("P", {
-            "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "needs live web data",
-        })
-
-    _assert_dispatch_failure_left_nothing_stranded(task_id, "OpenAI is down")
-
-
-def test_handle_dispatch_task_file_analysis_failure_fails_the_task_and_run(temp_db, tmp_path, monkeypatch):
-    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
-
-    def outage(system_prompt, user_message, max_tokens=3000):
-        raise RuntimeError("Anthropic is down")
-
-    monkeypatch.setattr(supervisor_service.llm_service, "prompt_completion", outage)
-
-    with pytest.raises(ValueError, match="Anthropic is down"):
-        supervisor_service.handle_dispatch_task("P", {
-            "task_id": task_id, "research_method": "FILE_ANALYSIS", "reason": "files are available",
-        })
-
-    _assert_dispatch_failure_left_nothing_stranded(task_id, "Anthropic is down")
-
-
-def test_handle_dispatch_task_does_not_start_research_for_a_task_that_is_not_ready(temp_db, tmp_path, monkeypatch):
-    task_id = _ready_task_in_real_project(tmp_path, monkeypatch)
-    research_work_items_repo.update_fields(task_id, status="PROPOSED")
-    started = []
-    monkeypatch.setattr(
-        supervisor_service.openai_service, "start_deep_research", lambda prompt: started.append(prompt),
-    )
-
-    with pytest.raises(ValueError):
-        supervisor_service.handle_dispatch_task("P", {
-            "task_id": task_id, "research_method": "TARGETED_WEB", "reason": "x",
-        })
-
-    assert started == []  # a billed research run must never start for a task that failed validation
-    assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"
-
-
-def _dispatched_task_with_run(pid, status="completed"):
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    research_work_items_repo.update_fields(task_id, status="RUNNING")
-    run_id = f"run_{task_id}"
-    research_runs_repo.create(run_id, pid, None, None, "preview")
-    research_runs_repo.update(run_id, research_work_item_id=task_id, status=status)
-    return task_id
-
-
-def test_handle_review_outcome_raises_when_no_finished_run(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="running")
-    with pytest.raises(ValueError):
-        supervisor_service.handle_review_outcome("P", {
-            "task_id": task_id, "outcome": "COMPLETE", "reason": "x",
-        })
-
-
-def test_handle_review_outcome_raises_when_no_run_at_all(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    research_work_items_repo.update_fields(task_id, status="RUNNING")
-    with pytest.raises(ValueError):
-        supervisor_service.handle_review_outcome("P", {
-            "task_id": task_id, "outcome": "COMPLETE", "reason": "x",
-        })
-
-
-def test_handle_review_outcome_complete_goes_through_reviewing(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="completed")
-    result = supervisor_service.handle_review_outcome("P", {
-        "task_id": task_id, "outcome": "COMPLETE", "completeness_score": 0.9,
-        "evidence_score": 0.8, "identified_gaps": [], "reason": "fully answered",
-    })
-    assert result["outcome"] == "COMPLETE"
-    row = research_work_items_repo.get(task_id)
-    assert row["status"] == "COMPLETE"
-    assert row["completeness_score"] == 0.9
-
-
-def test_handle_review_outcome_follow_up_required(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="completed")
-    result = supervisor_service.handle_review_outcome("P", {
-        "task_id": task_id, "outcome": "FOLLOW_UP_REQUIRED",
-        "identified_gaps": ["Missing authoritative source"], "reason": "weak evidence",
-    })
-    assert result["outcome"] == "FOLLOW_UP_REQUIRED"
-    row = research_work_items_repo.get(task_id)
-    assert row["status"] == "FOLLOW_UP_REQUIRED"
-    assert row["identified_gaps_json"] == '["Missing authoritative source"]'
-
-
-def test_handle_review_outcome_failed_skips_reviewing(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    task_id = _dispatched_task_with_run(pid, status="failed")
-    result = supervisor_service.handle_review_outcome("P", {
-        "task_id": task_id, "outcome": "FAILED", "reason": "run errored out",
-    })
-    assert result["outcome"] == "FAILED"
-    row = research_work_items_repo.get(task_id)
-    assert row["status"] == "FAILED"
-    # No exception was raised getting here -- confirms RUNNING->FAILED was taken
-    # directly, since RUNNING->REVIEWING->FAILED is illegal per Phase 2's table
-    # (REVIEWING has no FAILED edge) and would have raised ValueError instead.
-
-
-def _complete_task_for_phase(pid, phase_key):
-    task_id = research_work_items_repo.create(pid, phase_key, f"Task for phase {phase_key}")
-    research_work_items_repo.update_fields(task_id, status="COMPLETE")
-    return task_id
-
-
-def test_handle_trigger_synthesis_rejects_when_one_phase_missing(temp_db):
-    pid = projects_repo.get_or_create_id("P")
-    # Phases 1-5 have a COMPLETE task; phase 6 does not.
-    for phase_key in ["1", "2", "3", "4", "5"]:
-        _complete_task_for_phase(pid, phase_key)
-
-    with pytest.raises(ValueError, match="6"):
-        supervisor_service.handle_trigger_synthesis("P", {"reason": "think we're done"})
-
-
-def test_handle_trigger_synthesis_succeeds_when_all_six_phases_complete(temp_db, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    from services import project_service
-    project_service.create_project("P")
-    pid = projects_repo.get_or_create_id("P")
-    for phase_key in ["1", "2", "3", "4", "5", "6"]:
-        _complete_task_for_phase(pid, phase_key)
-
-    monkeypatch.setattr(
-        supervisor_service.llm_service, "prompt_completion",
-        lambda system_prompt, user_message, max_tokens=4000: "## Strategic Options\n\nDo X, then Y.",
-    )
-
-    result = supervisor_service.handle_trigger_synthesis("P", {"reason": "all phases complete"})
-    assert result["synthesis_generated"] is True
-
-    from services import insights_service
-    current = insights_service.load_current_insights("P")
-    assert current["phases"]["7"]["summary"] == "## Strategic Options\n\nDo X, then Y."
-
-
-def test_tool_handlers_keys_match_tool_schemas_names():
-    # Guards against a typo'd TOOL_HANDLERS key (e.g. "propose_task" instead
-    # of "propose_tasks") that would otherwise surface only as a KeyError at
-    # runtime in run_supervisor_cycle, long after the handler itself was
-    # written and tested in isolation.
-    schema_names = {schema["name"] for schema in supervisor_service.TOOL_SCHEMAS}
-    assert set(supervisor_service.TOOL_HANDLERS.keys()) == schema_names
-
-
-class _FakeToolUseBlock:
+class _Block:
     def __init__(self, name, input):
         self.type = "tool_use"
         self.name = name
         self.input = input
 
 
-class _FakeTextBlock:
-    def __init__(self, text):
-        self.type = "text"
-        self.text = text
-
-
-class _FakeAnthropicResponse:
-    def __init__(self, content):
-        self.content = content
-
-
-class _FakeMessages:
-    def __init__(self, response):
-        self._response = response
+class _FakeClient:
+    def __init__(self, blocks=(), error=None):
+        self.calls = []
+        self._blocks = list(blocks)
+        self._error = error
+        self.messages = self
 
     def create(self, **kwargs):
-        return self._response
-
-
-class _FakeAnthropicClient:
-    def __init__(self, response):
-        self.messages = _FakeMessages(response)
-
-
-def _patch_anthropic(monkeypatch, tool_name, tool_input, preceding_text=None):
-    content = []
-    if preceding_text:
-        content.append(_FakeTextBlock(preceding_text))
-    content.append(_FakeToolUseBlock(tool_name, tool_input))
-    response = _FakeAnthropicResponse(content)
-    monkeypatch.setattr(
-        supervisor_service.anthropic, "Anthropic",
-        lambda api_key: _FakeAnthropicClient(response),
-    )
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return SimpleNamespace(content=self._blocks)
 
 
 @pytest.fixture
-def app_context():
+def app_context(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     from app import create_app
     flask_app = create_app()
     with flask_app.app_context():
-        yield
+        yield flask_app
 
 
-def test_run_supervisor_cycle_executes_and_records_decision(temp_db, app_context, monkeypatch):
+@pytest.fixture
+def drafted(monkeypatch):
+    monkeypatch.setattr(llm_service, "prompt_completion",
+                        lambda system, user, max_tokens=4000: "ROLE: analyst. A complete drafted research prompt.")
+
+
+def _install(monkeypatch, client):
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
+    return client
+
+
+def _propose(*tasks, reason="Phases have no research yet"):
+    return _Block("propose_tasks", {"tasks": list(tasks), "reason": reason})
+
+
+def _task(phase="1", title="Landscape overview", method="TARGETED_WEB", **extra):
+    return dict({"phase_key": phase, "title": title, "research_method": method,
+                 "focus": ["Providers"], "rationale": "Phase has no research"}, **extra)
+
+
+# ---- drafting ----
+
+def test_drafting_offers_only_propose_and_no_action(temp_db, app_context, drafted, monkeypatch):
+    projects_repo.get_or_create_id("P")
+    client = _install(monkeypatch, _FakeClient([_Block("no_action", {"reason": "Nothing to add"})]))
+    supervisor_service.draft_researches("P")
+    call = client.calls[0]
+    assert {t["name"] for t in call["tools"]} == {"propose_tasks", "no_action"}
+    assert call["tool_choice"] == {"type": "any"}
+    assert set(supervisor_service.DRAFTING_HANDLERS) == {"propose_tasks", "no_action"}
+
+
+def test_the_supervisor_has_no_way_to_approve_or_start_research():
+    for removed in ("handle_mark_ready", "handle_dispatch_task", "handle_skip_task",
+                    "handle_trigger_synthesis", "run_supervisor_cycle", "TOOL_HANDLERS"):
+        assert not hasattr(supervisor_service, removed)
+
+
+def test_propose_creates_drafted_cards_awaiting_approval(temp_db, app_context, drafted, monkeypatch):
     pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    _patch_anthropic(monkeypatch, "mark_ready", {"task_id": task_id, "reason": "ready to go"})
-
-    result = supervisor_service.run_supervisor_cycle("P")
-
-    assert result["decision"]["action"] == "mark_ready"
+    _install(monkeypatch, _FakeClient([_propose(
+        _task(),
+        _task(phase="3", title="Website review", framework_key="oes-marketing-website"),
+    )]))
+    result = supervisor_service.draft_researches("P")
     assert result["execution"]["success"] is True
-    assert research_work_items_repo.get(task_id)["status"] == "READY"
+    items = research_work_items_repo.list_for_project(pid)
+    assert [i["status"] for i in items] == ["PROPOSED", "PROPOSED"]
+    assert items[0]["framework_key"] == "oes-landscape"
+    assert items[1]["framework_key"] == "oes-marketing-website"
+    assert items[0]["prompt_text"].startswith("ROLE: analyst.")
+    assert items[0]["rationale"] == "Phase has no research"
+    decision = agent_decisions_repo.list_for_project(pid)[0]
+    assert decision["decision_type"] == "propose_tasks"
+    assert json.loads(decision["detail"])["execution"]["success"] is True
 
-    decisions = agent_decisions_repo.list_for_project(pid)
-    assert len(decisions) == 1
-    assert decisions[0]["decision_type"] == "mark_ready"
-    assert decisions[0]["research_work_item_id"] == task_id
 
-
-def test_run_supervisor_cycle_records_failed_decision_without_crashing(temp_db, app_context, monkeypatch):
+@pytest.mark.parametrize("bad_task", [
+    _task(phase="7", title="Options"),
+    _task(method="DEEP_MAGIC"),
+    _task(title="   "),
+    _task(depends_on_batch_indices=[5]),
+])
+def test_invalid_proposals_create_nothing_and_are_recorded(temp_db, app_context, drafted, monkeypatch, bad_task):
     pid = projects_repo.get_or_create_id("P")
-    task_id = research_work_items_repo.create(pid, "4", "Task")
-    research_work_items_repo.update_fields(task_id, status="COMPLETE")
-    _patch_anthropic(monkeypatch, "mark_ready", {"task_id": task_id, "reason": "trying anyway"})
-
-    result = supervisor_service.run_supervisor_cycle("P")
-
+    _install(monkeypatch, _FakeClient([_propose(_task(title="Fine one"), bad_task)]))
+    result = supervisor_service.draft_researches("P")
     assert result["execution"]["success"] is False
-    assert "error" in result["execution"]
-    decisions = agent_decisions_repo.list_for_project(pid)
-    assert len(decisions) == 1  # still recorded, even though execution failed
+    assert research_work_items_repo.list_for_project(pid) == []
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "propose_tasks"
 
 
-def test_run_supervisor_cycle_propagates_cycle_rejection_as_failed_decision(temp_db, app_context, monkeypatch):
-    # Same mutual-dependency construction as Task 5's handler-level cycle
-    # test, but driven end-to-end through run_supervisor_cycle: the (faked)
-    # model proposes two tasks in one batch that depend on each other via
-    # batch indices, which is a genuine cycle once both edges are wired.
+def test_a_cycle_between_proposals_creates_nothing(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _install(monkeypatch, _FakeClient([_propose(
+        _task(title="A", depends_on_batch_indices=[1]), _task(title="B", depends_on_batch_indices=[0]),
+    )]))
+    assert supervisor_service.draft_researches("P")["execution"]["success"] is False
+    assert research_work_items_repo.list_for_project(pid) == []
+
+
+def test_batch_dependencies_are_wired_to_real_ids(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    _install(monkeypatch, _FakeClient([_propose(_task(title="A"), _task(title="B", depends_on_batch_indices=[0]))]))
+    supervisor_service.draft_researches("P")
+    a, b = research_work_items_repo.list_for_project(pid)
+    assert [d["depends_on_work_item_id"] for d in research_work_items_repo.list_dependencies(b["id"])] == [a["id"]]
+
+
+def test_no_tool_call_raises(temp_db, app_context, monkeypatch):
     projects_repo.get_or_create_id("P")
-    _patch_anthropic(monkeypatch, "propose_tasks", {
-        "tasks": [
-            {"phase_key": "4", "title": "X", "depends_on_batch_indices": [1]},
-            {"phase_key": "4", "title": "Y", "depends_on_batch_indices": [0]},
-        ],
-        "reason": "mutually dependent tasks",
-    })
-
-    result = supervisor_service.run_supervisor_cycle("P")
-
-    assert result["execution"]["success"] is False
-    assert "cycle" in result["execution"]["error"].lower()
-    decisions = agent_decisions_repo.list_for_project(projects_repo.get_or_create_id("P"))
-    assert len(decisions) == 1
-    assert decisions[0]["decision_type"] == "propose_tasks"
-
-
-def test_run_supervisor_cycle_no_tool_use_block_raises(temp_db, app_context, monkeypatch):
-    projects_repo.get_or_create_id("P")
-    response = _FakeAnthropicResponse([_FakeTextBlock("I don't know what to do.")])
-    monkeypatch.setattr(
-        supervisor_service.anthropic, "Anthropic",
-        lambda api_key: _FakeAnthropicClient(response),
-    )
+    _install(monkeypatch, _FakeClient([SimpleNamespace(type="text", text="Hmm")]))
     with pytest.raises(RuntimeError):
-        supervisor_service.run_supervisor_cycle("P")
+        supervisor_service.draft_researches("P")
+
+
+# ---- reviewing ----
+
+def _running_card(pid, output="Sources (1):\n- A - https://a.example\n\nReport body.", run_status="completed", **card_fields):
+    card_id = research_task_service.create_task(pid, "4", "Fees", research_method="TARGETED_WEB",
+                                                prompt_text="Find the fees.", entities=["Fees"], **card_fields)
+    research_work_items_repo.update_fields(card_id, status="RUNNING")
+    research_runs_repo.create(f"run_{card_id}", pid, "resp", None, "Find the fees.")
+    research_runs_repo.update(f"run_{card_id}", research_work_item_id=card_id, status=run_status,
+                              output_text=output, prompt_text="Find the fees.")
+    return card_id
+
+
+def _review(outcome, **extra):
+    return _Block("review_outcome", dict({"completeness_score": 0.8, "evidence_score": 0.7,
+                                          "identified_gaps": ["No intake dates"], "outcome": outcome,
+                                          "reason": "Because"}, **extra))
+
+
+def test_review_is_forced_to_the_review_tool(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    client = _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
+    supervisor_service.review_card("P", card_id)
+    call = client.calls[0]
+    assert [t["name"] for t in call["tools"]] == ["review_outcome"]
+    assert call["tool_choice"] == {"type": "tool", "name": "review_outcome"}
+    assert "Report body." in call["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("outcome,status", [
+    ("COMPLETE", "COMPLETE"), ("FOLLOW_UP_REQUIRED", "FOLLOW_UP_REQUIRED"),
+    ("NEEDS_HUMAN", "WAITING_FOR_HUMAN"), ("FAILED", "FAILED"),
+])
+def test_review_outcomes(temp_db, app_context, monkeypatch, outcome, status):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review(outcome)]))
+    result = supervisor_service.review_card("P", card_id)
+    row = research_work_items_repo.get(card_id)
+    assert result["reviewed"] is True
+    assert row["status"] == status
+    assert row["completeness_score"] == 0.8
+    assert json.loads(row["identified_gaps_json"]) == ["No intake dates"]
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "review_outcome"
+
+
+def test_follow_up_arrives_as_a_new_draft(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", followup={
+        "title": "Verify intake dates", "focus": ["Intakes"], "research_method": "TARGETED_WEB",
+        "rationale": "Intake dates were missing"})]))
+    result = supervisor_service.review_card("P", card_id)
+    follow = research_work_items_repo.get(result["followup_card_id"])
+    assert follow["status"] == "PROPOSED"
+    assert follow["suggested_from_work_item_id"] == card_id
+    assert follow["phase_key"] == "4"
+    assert follow["prompt_text"].startswith("ROLE: analyst.")
+    assert research_work_items_repo.list_dependencies(card_id) == []
+
+
+def test_complete_on_a_card_already_flagged_for_a_person_waits_for_them(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid, human_review_required=True)
+    _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
+    supervisor_service.review_card("P", card_id)
+    assert research_work_items_repo.get(card_id)["status"] == "WAITING_FOR_HUMAN"
+
+
+def test_a_failed_review_call_releases_the_claim(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient(error=RuntimeError("Anthropic is down")))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is False
+    assert research_work_items_repo.get(card_id)["status"] == "RUNNING"
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "review_error"
+
+
+def test_a_card_already_claimed_is_not_reviewed_twice(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    research_task_service.claim_transition(card_id, "RUNNING", "REVIEWING")
+    client = _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
+    assert supervisor_service.review_card("P", card_id)["reviewed"] is False
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("run_status,output", [("running", None), ("failed", None), ("completed", "")])
+def test_cards_whose_run_has_not_produced_a_report_are_not_reviewed(temp_db, app_context, monkeypatch, run_status, output):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid, output=output, run_status=run_status)
+    client = _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
+    assert supervisor_service.review_card("P", card_id)["reviewed"] is False
+    assert client.calls == []
+    assert research_work_items_repo.get(card_id)["status"] == "RUNNING"
+
+
+def test_review_sees_the_report_clipped_to_the_existing_limit(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid, output="x" * (supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS + 5000))
+    client = _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
+    supervisor_service.review_card("P", card_id)
+    content = client.calls[0]["messages"][0]["content"]
+    assert "x" * supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS in content
+    assert "x" * (supervisor_service.MAX_RUN_OUTPUT_REVIEW_CHARS + 1) not in content

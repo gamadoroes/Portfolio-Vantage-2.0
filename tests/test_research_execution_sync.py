@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
-from services import research_execution_service, supervisor_service
+from services import research_execution_service
 
 
 def _web_task_with_run(pid, title, run_id, response_id="resp_1", run_status="running", output_text=None):
@@ -180,43 +180,3 @@ def test_sync_survives_a_failed_lookup_and_still_syncs_the_other_runs(temp_db, m
 
     assert research_runs_repo.get("run_1")["status"] == "running"  # untouched, retried next cycle
     assert "All good." in research_runs_repo.get("run_2")["output_text"]
-
-
-class _FakeToolUseBlock:
-    type = "tool_use"
-
-    def __init__(self, name, input):
-        self.name = name
-        self.input = input
-
-
-class _CapturingClient:
-    def __init__(self, tool_name, tool_input):
-        self.calls = []
-        self.messages = SimpleNamespace(create=self._create)
-        self._response = SimpleNamespace(content=[_FakeToolUseBlock(tool_name, tool_input)])
-
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
-        return self._response
-
-
-@pytest.fixture
-def app_context():
-    from app import create_app
-
-    with create_app().app_context():
-        yield
-
-
-def test_supervisor_cycle_shows_the_model_the_web_research_that_just_finished(temp_db, app_context, monkeypatch):
-    pid = projects_repo.get_or_create_id("P")
-    _web_task_with_run(pid, "Fees", "run_1")
-    _serve(monkeypatch, {"resp_1": _openai_response("completed", "The fee is $40,000.")})
-    client = _CapturingClient("no_action", {"reason": "nothing to do"})
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
-
-    supervisor_service.run_supervisor_cycle("P")
-
-    prompt_sent_to_model = client.calls[0]["messages"][0]["content"]
-    assert "The fee is $40,000." in prompt_sent_to_model
