@@ -176,6 +176,11 @@
                     </div>
                     
                     <div class="story-map-content">
+                        <div id="evidence-search" class="ev-search">
+                            <label for="evidence-search-input">Search facts</label>
+                            <input type="search" id="evidence-search-input" placeholder="Search the facts saved from your research, across all phases" autocomplete="off">
+                            <div id="evidence-search-results" aria-live="polite"></div>
+                        </div>
                         <div class="section-header-with-action">
                             <h3 class="dashboard-header" style="margin-bottom:0;">Competitor Landscape</h3>
                             <div id="competitor-section-actions"></div>
@@ -307,7 +312,8 @@
         <span id="insights-indicator-text">Generating insights...</span>
     </div>
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=13.5"></script>
+    <script src="/static/app.js?v=13.6"></script>
     <script src="/static/board.js?v=4"></script>
+    <script src="/static/evidence.js?v=1"></script>
 </body>
 </html>

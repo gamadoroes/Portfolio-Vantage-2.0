@@ -2109,9 +2109,15 @@ function renderInsights(data) {
                     </div>
                     ${renderPhaseLinkedFiles(key, phase)}
                     ${hasContent ? '<div class="phase-edit-hint">Click to edit</div>' : ''}
-                </div>`;
+                </div>
+                ${viewingHistoricalVersion ? '' : `<div class="ev-slot" data-evidence-phase="${escapeAttr(key)}"></div>`}`;
         });
     }
+
+    // Facts and conclusions sit below each phase card, outside it, so clicking them never opens the phase editor.
+    // Facts are not versioned, so no slot is written while a past Insights version is showing; evidence.js then
+    // finds nothing to fill.
+    if (typeof evidenceRenderAll === 'function') evidenceRenderAll(currentProject);
 
     renderExcludedCompetitors();
     renderPhaseNavBar(data);

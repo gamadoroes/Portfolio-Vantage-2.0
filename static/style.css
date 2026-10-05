@@ -1328,3 +1328,30 @@ mark.selection-highlight { background: rgba(255, 138, 0, 0.25); border-bottom: 2
 .rb-reader-body { padding: 18px; overflow-y: auto; }
 @media (prefers-reduced-motion: reduce) { .rb-s-run i, .rb-pulse { animation: none; } .rb-chev { transition: none; } }
 /* ===== end Research Board ===== */
+
+/* ---- Facts and conclusions on the Insights tab (static/evidence.js) ---- */
+.ev-search { margin: 0 0 1.5rem; }
+.ev-search label { display: block; font-weight: 600; color: var(--oes-ink); margin-bottom: 0.25rem; }
+.ev-search input { width: 100%; max-width: 32rem; padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 6px; }
+/* The phase list is a flex column with a 1.5rem gap: pull the slot up against its card, and drop it while empty. */
+.ev-slot { margin: -1.5rem 0 0; }
+.ev-slot:empty { display: none; }
+.ev-phase { background: #fff; border: 1px solid #e0e0e0; border-top: 0; border-radius: 0 0 8px 8px; padding: 0.75rem 1rem; }
+.ev-phase h4 { font-size: 0.9rem; margin: 0.5rem 0; }
+.ev-list { list-style: none; margin: 0; padding: 0; }
+.ev-fact, .ev-concl { padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; }
+.ev-fact.rejected, .ev-concl.rejected { opacity: 0.6; }
+.ev-head { display: flex; gap: 0.5rem; align-items: baseline; }
+.ev-num { font-family: monospace; font-size: 0.75rem; color: #666; flex-shrink: 0; }
+.ev-text { margin: 0; }
+.ev-quote { margin: 0.25rem 0 0 1.5rem; padding-left: 0.5rem; border-left: 3px solid var(--oes-sky); color: #444; font-size: 0.85rem; }
+.ev-meta { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
+.ev-meta a { color: var(--oes-ink); overflow-wrap: anywhere; }
+.ev-based { margin: 0; }
+.ev-warn { color: #b45309; }
+.ev-err { color: #dc3545; font-size: 0.85rem; }
+.ev-empty { color: #666; font-size: 0.85rem; margin: 0; }
+.ev-btn { font-size: 0.75rem; padding: 0.15rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; margin-left: auto; }
+.ev-btn:hover { border-color: var(--oes-ink); }
+.ev-rejected summary { cursor: pointer; font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
+.ev-results { margin-top: 0.5rem; }
