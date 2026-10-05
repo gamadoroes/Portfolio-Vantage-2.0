@@ -163,16 +163,19 @@ def run_synthesis(project_name, card_id, run_id):
         )
         text = llm_service.prompt_completion(SYNTHESIS_SYSTEM_PROMPT, user_message, max_tokens=SYNTHESIS_MAX_TOKENS)
 
-        phases = dict(current["phases"])
+        # Re-load: the Claude call is slow, and a report link or a phase refresh saved
+        # meanwhile must not be reverted. Only Phase 7's summary and confidence change.
+        latest = insights_service.load_current_insights(project_name)
+        phases = dict(latest["phases"])
         phase_7 = dict(phases.get("7", {}))
         phase_7["summary"] = text
         phase_7["confidence"] = "medium"
         phases["7"] = phase_7
         insights_service.save_insights(project_name, {
             # Kept unchanged: generated_at marks when the Phase 1-6 summaries were last refreshed.
-            "generated_at": current.get("generated_at") or datetime.now().isoformat(),
-            "competitors": current.get("competitors", []),
-            "competitor_landscape_markdown": current.get("competitor_landscape_markdown", ""),
+            "generated_at": latest.get("generated_at") or datetime.now().isoformat(),
+            "competitors": latest.get("competitors", []),
+            "competitor_landscape_markdown": latest.get("competitor_landscape_markdown", ""),
             "phases": phases,
         })
         research_run_service.update_run(

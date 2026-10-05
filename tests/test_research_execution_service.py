@@ -153,3 +153,38 @@ def test_synthesis_writes_phase_7_and_completes_the_card(pid, monkeypatch):
     assert current["phases"]["7"]["summary"] == "Options: do X."
     assert current["generated_at"] == "2026-10-01T00:00:00"
     assert research_runs_repo.find_latest_for_work_item(card_id)["output_text"] == "Options: do X."
+
+
+def test_synthesis_keeps_insights_changes_made_while_it_was_writing(pid, monkeypatch):
+    _complete_phases_1_to_6(pid)
+    insights_service.save_insights("P", {
+        "generated_at": "2026-10-01T00:00:00", "competitors": [], "competitor_landscape_markdown": "",
+        "phases": {str(i): {"title": f"Phase {i}", "summary": f"Summary {i}", "confidence": "high",
+                             "evidence_sources": [], "gaps": [], "suggested_topics": [],
+                             "linked_files": [], "linked_file_ids": []} for i in range(1, 8)},
+    })
+    research_execution_service.save_project_file("P", "Linked meanwhile.md", "# Report")
+    stable_id = research_execution_service.ensure_file_id("P", "Linked meanwhile.md")
+
+    def slow_claude(system, user, max_tokens=4000):
+        # While Claude is writing the options, a report is linked and a phase summary refreshed.
+        current = insights_service.load_current_insights("P")
+        phases = dict(current["phases"])
+        phase_4 = dict(phases["4"], linked_file_ids=[stable_id], linked_files=["Linked meanwhile.md"])
+        phase_3 = dict(phases["3"], summary="Refreshed summary 3")
+        phases["3"], phases["4"] = phase_3, phase_4
+        insights_service.save_insights("P", {
+            "generated_at": "2026-10-03T00:00:00", "competitors": [],
+            "competitor_landscape_markdown": "", "phases": phases,
+        })
+        return "Options: do X."
+
+    monkeypatch.setattr(llm_service, "prompt_completion", slow_claude)
+    card_id = _ready_card(pid, method="SYNTHESIS", phase="7", title="Options report")
+    research_execution_service.start_runs("P", [card_id])
+    current = insights_service.load_current_insights("P")
+    assert current["phases"]["7"]["summary"] == "Options: do X."
+    assert current["phases"]["7"]["confidence"] == "medium"
+    assert current["phases"]["3"]["summary"] == "Refreshed summary 3"
+    assert current["phases"]["4"]["linked_file_ids"] == [stable_id]
+    assert current["generated_at"] == "2026-10-03T00:00:00"
