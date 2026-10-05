@@ -25,6 +25,7 @@ EXPECTED_CALLERS = {
     "save_source": {"supervisor", "system"},
     "save_evidence": {"supervisor", "system"},
     "create_finding": {"supervisor", "system"},
+    "record_research_facts": {"supervisor"},
     "search_existing_evidence": {"supervisor", "user", "system"},
     "update_evidence_status": {"user"},
 }

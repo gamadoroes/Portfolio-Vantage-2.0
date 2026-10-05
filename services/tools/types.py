@@ -1,5 +1,6 @@
 # services/tools/types.py
 """Input building blocks shared by every tool."""
+import json
 from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
@@ -30,3 +31,18 @@ CardId = Annotated[int, Field(ge=1, le=2**63 - 1)]
 
 # A row id for facts, pages and conclusions: bounded like CardId.
 RowId = Annotated[int, Field(ge=1, le=2**63 - 1)]
+
+
+def _clip_to(limit):
+    def clip(value):
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value)
+        return str(value).strip()[:limit]
+    return clip
+
+
+def Clipped(max_chars):
+    """Text that is cut to max_chars instead of refused, for model output that is saved item by item."""
+    return Annotated[str, BeforeValidator(_clip_to(max_chars)), StringConstraints(max_length=max_chars)]
