@@ -4,18 +4,20 @@
 Only the user's Run action reaches start_runs (through board_service). The Supervisor has
 no path here. That's how the "nothing runs without your approval" rule is kept.
 """
+import re
 import threading
 from datetime import datetime
 
 from flask import current_app
 
-from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
+from db.repositories import projects_repo, research_runs_repo, research_work_items_repo, sources_repo
 
 from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
 from .deep_research_output import extract_deep_research_output
-from .file_index_service import HIDDEN_SOURCE_FILES, reconcile_file_index, reconcile_selected_file_ids
-from .file_service import load_project_files
+from .file_index_service import HIDDEN_SOURCE_FILES, ensure_file_id, reconcile_file_index, reconcile_selected_file_ids
+from .file_service import load_project_files, save_project_file
 from .phases import PHASE_DEFINITIONS
+from .project_service import get_project_file_path
 
 MAX_FILE_ANALYSIS_TOTAL_CHARS = 60000
 MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
@@ -263,3 +265,96 @@ def sync_web_research_runs(project_name):
                 project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
             )
         # queued / in_progress: still working; checked again next cycle.
+
+
+METHOD_LABELS = {"TARGETED_WEB": "Web research", "FILE_ANALYSIS": "My files", "SYNTHESIS": "Options report"}
+REPORT_TITLE_MAX_CHARS = 80
+_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_title(title):
+    cleaned = _UNSAFE_FILENAME_CHARS.sub(" ", title or "")
+    cleaned = " ".join(cleaned.split()).strip(" .")
+    cleaned = cleaned[:REPORT_TITLE_MAX_CHARS].rstrip(" .")
+    return cleaned or "Untitled"
+
+
+def report_filename(project_name, card, when):
+    base = f"Research P{card['phase_key']} - {_safe_title(card['title'])} ({when:%Y-%m-%d})"
+    candidate = f"{base}.md"
+    suffix = 2
+    while True:
+        path = get_project_file_path(project_name, candidate)
+        if path is None:
+            raise ValueError(f"Could not make a valid file name for {card['title']!r}")
+        if not path.exists():
+            return candidate
+        candidate = f"{base} {suffix}.md"
+        suffix += 1
+
+
+def _report_content(card, run):
+    phase = PHASE_DEFINITIONS.get(card["phase_key"], {}).get("title", "")
+    return (
+        f"# {card['title']}\n\n"
+        f"- Phase: {card['phase_key']} - {phase}\n"
+        f"- Method: {METHOD_LABELS.get(card['research_method'], card['research_method'] or '')}\n"
+        f"- Finished: {(run['completed_at'] or '')[:10]}\n\n"
+        f"## Research prompt\n\n{run['prompt_text'] or card['prompt_text'] or ''}\n\n"
+        f"## Report\n\n{run['output_text'] or ''}\n"
+    )
+
+
+def save_report(project_name, card_id, run_id):
+    """Save a finished run's report as a source file, once. Returns its stable file id."""
+    run = research_runs_repo.get(run_id)
+    if run["report_stable_file_id"]:
+        return run["report_stable_file_id"]
+    card = research_work_items_repo.get(card_id)
+    filename = report_filename(project_name, card, datetime.now())
+    save_project_file(project_name, filename, _report_content(card, run))
+    stable_id = ensure_file_id(project_name, filename)
+    research_run_service.update_run(project_name, run_id, report_stable_file_id=stable_id)
+    return stable_id
+
+
+def link_report(project_name, card_id, run_id):
+    """Link a saved report to its card's phase, once. A later unlink by the user is respected."""
+    run = research_runs_repo.get(run_id)
+    if not run["report_stable_file_id"] or run["report_linked_at"]:
+        return False
+    project_id = projects_repo.get_or_create_id(project_name)
+    card = research_work_items_repo.get(card_id)
+    linked_at = datetime.now().isoformat()
+    source = sources_repo.get_by_stable_id(project_id, run["report_stable_file_id"])
+    if source is None:  # the user deleted the file before it was linked
+        research_run_service.update_run(project_name, run_id, report_linked_at=linked_at)
+        return False
+
+    # Check if the file actually exists on disk
+    file_path = get_project_file_path(project_name, source["filename"])
+    if file_path is None or not file_path.exists():
+        research_run_service.update_run(project_name, run_id, report_linked_at=linked_at)
+        return False
+
+    current = insights_service.load_current_insights(project_name)
+    phases = dict(current["phases"])
+    phase = dict(phases[card["phase_key"]])
+    ids = list(phase.get("linked_file_ids") or [])
+    names = list(phase.get("linked_files") or [])
+    added = source["stable_file_id"] not in ids
+    if added:
+        ids.append(source["stable_file_id"])
+        names.append(source["filename"])
+        phase["linked_file_ids"] = ids
+        phase["linked_files"] = names
+        phases[card["phase_key"]] = phase
+        insights_service.save_insights(project_name, {
+            # Unchanged: generated_at marks when summaries were last generated, not when files were linked.
+            "generated_at": current.get("generated_at", ""),
+            "competitors": current.get("competitors", []),
+            "competitor_landscape_markdown": current.get("competitor_landscape_markdown", ""),
+            "phases": phases,
+        })
+    research_run_service.update_run(project_name, run_id, report_linked_at=linked_at)
+    return added
