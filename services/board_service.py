@@ -25,8 +25,9 @@ from . import (
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt, save_project_prompt
 from .prompt_drafting_service import FALLBACK_MARKER, create_drafted_card, draft_prompt
-from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase, resolve_framework
+from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase
 from .text_utils import as_text_list
+from .tools import run_tool
 
 MIN_PROMPT_CHARS = 40
 STALE_REVIEW_CLAIM_SECONDS = 600
@@ -122,6 +123,23 @@ def _focus(card):
 
 # ---- card actions ----
 
+def _user_tool(project_name, name, inputs):
+    """Run a tool as the user and turn a failure back into the board's existing exceptions."""
+    result = run_tool(name, "user", project_name, inputs)
+    if result.ok:
+        return result.data
+    code, message = result.error["code"], result.error["message"]
+    if code == "not_found":
+        raise CardNotFound(message)
+    if code == "conflict":
+        raise BoardStateError(message)
+    if code == "unavailable":
+        raise DraftingUnavailable(message)
+    if code == "invalid_input":
+        raise ValueError(message)
+    raise RuntimeError(message)
+
+
 def create_card(project_name, data):
     phase_key = str(data.get("phase_key") or "")
     title = (data.get("title") or "").strip()
@@ -132,21 +150,14 @@ def create_card(project_name, data):
         raise ValueError("Add a title.")
     if method not in USER_METHODS:
         raise ValueError("Choose how it runs: web research or your files.")
-    focus = _clean_focus(data.get("focus"))
-    rationale = (data.get("rationale") or "").strip() or None
-    if data.get("draft_prompt"):
-        card_id = create_drafted_card(
-            project_name, phase_key, title, research_method=method, focus=focus or None,
-            rationale=rationale, framework_key=data.get("framework_key"),
-        )["card_id"]
-    else:
-        card_id = research_task_service.create_task(
-            _project_id(project_name), phase_key, title, research_method=method, entities=focus or None,
-            rationale=rationale, framework_key=resolve_framework(phase_key, data.get("framework_key")),
-            prompt_text=(data.get("prompt_text") or "").strip() or None,
-        )
-    _record(project_name, "user_add", research_work_items_repo.get(card_id))
-    return card_id
+    task = {
+        "phase_key": phase_key, "title": title, "research_method": method,
+        "focus": _clean_focus(data.get("focus")), "rationale": (data.get("rationale") or "").strip(),
+        "framework_key": data.get("framework_key") or None,
+        "prompt_text": (data.get("prompt_text") or "").strip() or None,
+        "draft_prompt": bool(data.get("draft_prompt")),
+    }
+    return _user_tool(project_name, "create_research_task", {"tasks": [task]})["created_task_ids"][0]
 
 
 def edit_card(project_name, card_id, data):
