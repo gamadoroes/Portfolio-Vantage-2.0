@@ -40,7 +40,8 @@ python -m pytest tests/ -v
   - `reference_integrity_service.py` — Cleans stale file references on delete
   - `research_run_service.py` — Tracks deep research run state
   - `docx_service.py` — DOCX report generation with OES branding (Valencia #FF8A00, Ink #001738, Sky #82CBD4)
-  - `tools/` — the Supervisor tool layer: every Supervisor action, and the board's status/run actions, go through `tools.run_tool(name, caller, project, inputs)` — pydantic-validated inputs, structured results, a per-tool list of allowed callers (`supervisor` / `user` / `system`) and a log row in `tool_calls`. The Supervisor can only use the tools on its menus (`supervisor_service.DRAFTING_MENU`, `REVIEW_MENU`); anything that spends money or changes what runs is user/system-only. To let the Supervisor use a tool later, add `"supervisor"` to that tool's `callers` (and to a menu).
+  - `tools/` — the Supervisor tool layer: every Supervisor action, and the board's status/run actions, go through `tools.run_tool(name, caller, project, inputs)` — pydantic-validated inputs, structured results, a per-tool list of allowed callers (`supervisor` / `user` / `system`) and a log row in `tool_calls`. The Supervisor can only use the tools on its menus (`supervisor_service.DRAFTING_MENU`, `REVIEW_MENU`, `EXTRACT_MENU`); anything that spends money or changes what runs is user/system-only. To let the Supervisor use a tool later, add `"supervisor"` to that tool's `callers` (and to a menu).
+  - Facts and conclusions (Phase 4b): right after each review (any outcome but FAILED; never the options report), the system runs `extract_research_facts`. That is one more Claude call, reading up to 60,000 characters of the report (the review itself still sees 8,000, unchanged). It saves the report's key facts (each with the page it came from and the date it applies to) and up to 3 conclusions per phase through `record_research_facts` (`services/tools/research_facts.py`; the smaller `save_source` / `save_evidence` / `create_finding` / `search_existing_evidence` / `update_evidence_status` tools are in `services/tools/evidence.py`). A failed extraction never changes the review. Cards without facts (older reports, or a failed or empty extraction) get an "Extract facts" button: the same tool, called by the user. `research_runs.facts_extracted_at` stops a report being paid for twice. Drafting sees a capped `# KNOWN FACTS` section (`MAX_KNOWN_FACTS_CHARS` in `supervisor_service`). Nothing is deleted; the person can reject and restore facts and conclusions on the Insights tab.
 
 ### Frontend
 
@@ -48,6 +49,7 @@ python -m pytest tests/ -v
 - No framework; vanilla JS with Marked.js (markdown), DOMPurify (sanitization), Turndown (HTML→MD)
 - 6 tabs: Builder, Research, Insights, Methodology, Objective, Artifacts
 - **Research** tab (`static/board.js`, `routes/board.py`, `services/board_service.py`): the Supervisor drafts research cards with prompts built from the phase frameworks (`services/prompt_frameworks.json`); the user edits, approves and runs them; finished reports are reviewed automatically and saved as phase-linked sources. Nothing runs without the user's approval.
+- **Insights → facts** (`static/evidence.js`, `routes/evidence.py`, `services/evidence_service.py`): below each phase write-up, the phase's conclusions and facts with their sources, Reject / Restore, and a fact search box. Built as DOM nodes with `textContent` only; links only for http/https.
 - Chat uses Server-Sent Events (`text/event-stream`) for real-time LLM streaming
 
 ### Data Model
@@ -62,6 +64,8 @@ Each project directory contains:
 - `files/` — user-uploaded source documents
 
 **Hidden source files** (managed internally, excluded from user file lists): `insights.json`, `insights_history.json`, `excluded_competitors.json`.
+
+**Facts and conclusions** live in the database (migration `0007`): `cited_sources`, `facts`, `conclusions`, `conclusion_facts`. These are separate from the older `evidence` / `findings` tables, which back the Insights phase write-ups.
 
 ## Key Conventions
 

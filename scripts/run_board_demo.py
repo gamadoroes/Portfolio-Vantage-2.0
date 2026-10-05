@@ -44,6 +44,18 @@ class Block:
 
 
 review_outcomes = itertools.cycle(["COMPLETE", "FOLLOW_UP_REQUIRED", "NEEDS_HUMAN"])
+demo_numbers = itertools.count(1)
+extraction_calls = itertools.count(1)
+
+
+def demo_facts():
+    n = next(demo_numbers)
+    return {"facts": [
+        {"claim": f"Providers offer graduate certificates and masters (demo report {n}).",
+         "source_url": "https://example.edu/psych", "source_title": "Provider page", "as_of": "2026"},
+        {"claim": f"Intake dates were not on an official page (demo report {n}).", "as_of": "2026"},
+    ], "conclusions": [{"text": f"Online Psychology study is mostly certificates and masters (demo report {n}).",
+                        "fact_numbers": [1, 2]}]}
 
 
 class FakeAnthropic:
@@ -61,6 +73,10 @@ class FakeAnthropic:
                 {"phase_key": "5", "title": "Curriculum structure from uploaded handbooks", "research_method": "FILE_ANALYSIS",
                  "focus": ["Units"], "rationale": "Curriculum detail is usually in your files."},
             ]})])
+        if names == {"record_research_facts"}:  # the extraction after a review, or the Extract facts button
+            if next(extraction_calls) % 3 == 0:
+                return SimpleNamespace(content=[Block("record_research_facts", {"facts": [], "conclusions": []})])
+            return SimpleNamespace(content=[Block("record_research_facts", demo_facts())])
         outcome = next(review_outcomes)
         payload = {"completeness_score": 0.62, "evidence_score": 0.55, "identified_gaps": ["Intake dates not on an official page."],
                    "outcome": outcome, "reason": "Demo review."}

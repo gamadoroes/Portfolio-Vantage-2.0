@@ -32,14 +32,44 @@ EXPECTED_CALLERS = {
 }
 
 
-def test_the_registry_is_exactly_the_phase_4a_tools_with_the_agreed_callers():
+def test_the_registry_is_exactly_the_agreed_tools_with_the_agreed_callers():
     registered = {name: set(t.callers) for name, t in tools.all_tools().items() if not name.startswith("test_")}
     assert registered == EXPECTED_CALLERS
 
 
+SUPERVISOR_MENUS = ("DRAFTING_MENU", "REVIEW_MENU", "EXTRACT_MENU")
+
+
+def _menu_tools():
+    return [name for menu in SUPERVISOR_MENUS for name in getattr(supervisor_service, menu)]
+
+
 def test_the_supervisor_menus_only_hold_tools_it_may_call():
-    for name in supervisor_service.DRAFTING_MENU + supervisor_service.REVIEW_MENU:
+    for name in _menu_tools():
         assert "supervisor" in tools.get_tool(name).callers
+
+
+def test_the_supervisor_saves_facts_only_through_record_research_facts():
+    assert supervisor_service.EXTRACT_MENU == ("record_research_facts",)
+    assert set(_menu_tools()).isdisjoint({"save_source", "save_evidence", "create_finding",
+                                          "update_evidence_status", "extract_research_facts"})
+
+
+def test_the_review_menu_is_unchanged_and_the_review_has_no_fact_fields():
+    assert supervisor_service.REVIEW_MENU == ("evaluate_research_output",)
+    props = tools.claude_tools(["evaluate_research_output"])[0]["input_schema"]["properties"]
+    assert "facts" not in props and "conclusions" not in props
+
+
+@pytest.mark.parametrize("name,caller", [
+    ("update_evidence_status", "supervisor"), ("update_evidence_status", "system"),
+    ("extract_research_facts", "supervisor"),  # the system may extract (after a review); the Supervisor never
+])
+def test_the_supervisor_cannot_reject_restore_or_start_a_paid_extraction(temp_db, name, caller):
+    pid = projects_repo.get_or_create_id("P")
+    card = research_work_items_repo.create(pid, "4", "Card")
+    inputs = {"kind": "fact", "id": 1, "action": "reject"} if name == "update_evidence_status" else {"task_id": card}
+    assert tools.run_tool(name, caller, "P", inputs).error["code"] == "not_allowed"
 
 
 @pytest.mark.parametrize("name", sorted(n for n, c in EXPECTED_CALLERS.items() if "supervisor" not in c))
