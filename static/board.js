@@ -334,7 +334,12 @@
         const el = root();
         if (!el) return;
         if (!activeProject()) { el.innerHTML = '<div class="rb-empty">Select a project to see its research plan.</div>'; return; }
-        if (!board.state) { el.innerHTML = '<div class="rb-empty">Loading the research plan…</div>'; return; }
+        if (!board.state) {
+            el.innerHTML = board.view.message
+                ? `<div class="rb-message" role="alert"><span>${esc(board.view.message)}</span><button type="button" class="rb-btn" data-act="reload">Try again</button></div>`
+                : '<div class="rb-empty">Loading the research plan…</div>';
+            return;
+        }
         el.innerHTML = renderBoard(board.state, board.view);
     }
 
@@ -352,6 +357,7 @@
 
     async function loadBoard() {
         const project = syncProject();
+        board.view.message = '';
         render();
         if (!project) return;
         const seq = ++board.loadSeq;
