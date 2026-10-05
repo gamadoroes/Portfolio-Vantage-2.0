@@ -6,11 +6,11 @@ from flask import current_app
 
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 
-from . import insights_service, research_task_service
+from . import research_task_service
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
 from .prompt_drafting_service import create_drafted_card
-from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase, resolve_framework
+from .prompt_frameworks import resolve_framework
 from .review_limits import (
     MAX_CONTEXT_CHARS,
     MAX_REVIEW_OUTPUT_TOTAL_CHARS,
@@ -18,6 +18,7 @@ from .review_limits import (
     MAX_RUN_OUTPUT_REVIEW_CHARS,
 )
 from .text_utils import as_text_list, clip_text
+from .tools import run_tool
 
 # Each task line also carries what the card is about, kept short.
 MAX_FOCUS_CHARS = 150
@@ -64,9 +65,8 @@ def _card_details(item):
     return " | " + " ".join(parts)
 
 
-def _format_work_item(item, dependencies, run=None, review_output_limit=None):
-    dep_ids = [d["depends_on_work_item_id"] for d in dependencies]
-    dep_text = f" | depends on: {dep_ids}" if dep_ids else ""
+def _format_work_item(item, dep_ids, run=None, review_output_limit=None):
+    dep_text = f" | depends on: {list(dep_ids)}" if dep_ids else ""
     line = (
         f"- id={item['id']} phase={item['phase_key']} title=\"{item['title']}\" "
         f"status={item['status']} priority={item['priority']} "
@@ -93,71 +93,54 @@ def _format_work_item(item, dependencies, run=None, review_output_limit=None):
 
 
 def build_context(project_name):
-    project_id = projects_repo.get_or_create_id(project_name)
-    blocks = []
+    result = run_tool("get_project_state", "system", project_name, {})
+    if not result.ok:
+        raise RuntimeError(result.error["message"])
+    return format_briefing(result.data)
 
-    objective = load_project_prompt(project_name, "project_prompt")
-    blocks.append(f"# PROJECT OBJECTIVE\n\n{objective or '(none set)'}")
 
+def _decision_block(decisions, truncated):
+    heading = "# RECENT SUPERVISOR DECISIONS (most recent first" + (", truncated" if truncated else "") + ")"
+    lines = [f"- {d['decision_type']}: {d['detail']}" for d in decisions]
+    return f"{heading}\n\n" + ("\n".join(lines) if lines else "(no prior decisions)")
+
+
+def format_briefing(state):
+    titles = {p["key"]: p["title"] for p in state["phases"]}
+    blocks = [f"# PROJECT OBJECTIVE\n\n{state['objective'] or '(none set)'}"]
     blocks.append(
         "# PHASE DEFINITIONS\n\n"
         + "\n".join(
-            f"- {key}: {defn['title']} (frameworks: "
-            + ", ".join(f"{fk} = {FRAMEWORK_LABELS[fk]}" for fk in frameworks_for_phase(key))
+            f"- {p['key']}: {p['title']} (frameworks: "
+            + ", ".join(f"{f['key']} = {f['label']}" for f in p["frameworks"])
             + ")"
-            for key, defn in PHASE_DEFINITIONS.items()
+            for p in state["phases"]
         )
     )
-
-    current = insights_service.load_current_insights(project_name)
-    phase_lines = []
-    for key, phase in current["phases"].items():
-        summary = phase.get("summary", "MISSING")
-        if summary and summary != "MISSING":
-            phase_lines.append(f"- Phase {key} ({PHASE_DEFINITIONS[key]['title']}): {summary}")
+    phase_lines = [f"- Phase {key} ({titles[key]}): {summary}" for key, summary in state["phase_summaries"].items()]
     blocks.append(
         "# EXISTING PHASE FINDINGS (read-only; you never modify these directly)\n\n"
         + ("\n".join(phase_lines) if phase_lines else "(no phase findings established yet)")
     )
-
-    items = research_work_items_repo.list_for_project(project_id)
     item_lines = []
     review_budget = MAX_REVIEW_OUTPUT_TOTAL_CHARS
-    for item in items:
-        run = research_runs_repo.find_latest_for_work_item(item["id"])
+    for card in state["cards"]:
+        run = card["latest_run"]
         review_output_limit = None
-        if _awaiting_review(item, run) and review_budget >= MAX_RUN_OUTPUT_REVIEW_CHARS:
+        if _awaiting_review(card, run) and review_budget >= MAX_RUN_OUTPUT_REVIEW_CHARS:
             review_output_limit = MAX_RUN_OUTPUT_REVIEW_CHARS
             review_budget -= min(len(run["output_text"]), review_output_limit)
-        item_lines.append(
-            _format_work_item(
-                item, research_work_items_repo.list_dependencies(item["id"]), run, review_output_limit
-            )
-        )
-    blocks.append(
-        "# RESEARCH TASKS\n\n" + ("\n".join(item_lines) if item_lines else "(no research tasks yet)")
-    )
-
-    decisions = agent_decisions_repo.list_for_project(project_id, limit=10)
-    decision_lines = [f"- {d['decision_type']}: {d['detail']}" for d in decisions]
-    blocks.append(
-        "# RECENT SUPERVISOR DECISIONS (most recent first)\n\n"
-        + ("\n".join(decision_lines) if decision_lines else "(no prior decisions)")
-    )
+        item_lines.append(_format_work_item(card, card["dependency_ids"], run, review_output_limit))
+    blocks.append("# RESEARCH TASKS\n\n" + ("\n".join(item_lines) if item_lines else "(no research tasks yet)"))
+    blocks.append(_decision_block(state["recent_decisions"], truncated=False))
 
     text = "\n\n".join(blocks)
     if len(text) > MAX_CONTEXT_CHARS:
         # Drop the oldest decisions first (least useful context), then hard-clip.
-        decisions = agent_decisions_repo.list_for_project(project_id, limit=3)
-        decision_lines = [f"- {d['decision_type']}: {d['detail']}" for d in decisions]
-        blocks[-1] = (
-            "# RECENT SUPERVISOR DECISIONS (most recent first, truncated)\n\n"
-            + ("\n".join(decision_lines) if decision_lines else "(no prior decisions)")
-        )
+        blocks[-1] = _decision_block(state["recent_decisions"][:3], truncated=True)
         text = "\n\n".join(blocks)
     if len(text) > MAX_CONTEXT_CHARS:
         text = text[:MAX_CONTEXT_CHARS] + "\n\n[...context truncated for length...]"
-
     return text
 
 
@@ -380,12 +363,15 @@ def create_followup_card(project_name, original, followup):
     return created["card_id"]
 
 
-def _review_context(project_name, card, run):
+def _review_context(project_name, task):
+    card, run = task["card"], task["latest_run"]
     objective = load_project_prompt(project_name, "project_prompt") or "(none set)"
     phase_title = PHASE_DEFINITIONS.get(card["phase_key"], {}).get("title", card["phase_key"])
     prompt = _clip_run_output(run["prompt_text"] or card["prompt_text"] or "", MAX_REVIEW_PROMPT_CHARS)
+    excerpt = run["report_excerpt"]
     item_line = _format_work_item(
-        card, research_work_items_repo.list_dependencies(card["id"]), run, MAX_RUN_OUTPUT_REVIEW_CHARS
+        card, card["dependency_ids"], {"status": run["status"], "output_text": excerpt},
+        review_output_limit=max(len(excerpt), 1),
     )
     return (
         f"# PROJECT OBJECTIVE\n\n{objective}\n\n"
@@ -430,11 +416,14 @@ def review_card(project_name, card_id):
         return {"reviewed": False, "reason": "This research is already being reviewed."}
 
     try:
+        task = run_tool("get_task", "system", project_name, {"task_id": card_id})
+        if not task.ok:
+            raise RuntimeError(task.error["message"])
         response = _client().messages.create(
             model=current_app.config["ANTHROPIC_MODEL"],
             max_tokens=2000,
             system=REVIEW_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _review_context(project_name, card, run)}],
+            messages=[{"role": "user", "content": _review_context(project_name, task.data)}],
             tools=[REVIEW_TOOL],
             tool_choice={"type": "tool", "name": "review_outcome"},
         )
