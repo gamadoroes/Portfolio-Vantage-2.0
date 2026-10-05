@@ -113,6 +113,18 @@ def edit_card(card_id):
         return _error(exc)
 
 
+@board_bp.route("/api/board/cards/<int:card_id>/extract-facts", methods=["POST"])
+def extract_facts(card_id):
+    project, _ = _request_project()
+    if not project:
+        return _no_project()
+    try:
+        result = board_service.extract_facts(project, card_id)
+        return _ok(project, result=result, note=board_service.extract_note(result))
+    except Exception as exc:
+        return _error(exc)
+
+
 @board_bp.route("/api/board/cards/<int:card_id>/<action>", methods=["POST"])
 def card_action(card_id, action):
     project, _ = _request_project()

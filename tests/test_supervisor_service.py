@@ -750,6 +750,28 @@ def test_an_extraction_that_fails_or_finds_nothing_leaves_the_review_exactly_as_
     assert research_runs_repo.get(f"run_{card_id}")["facts_extracted_at"] is None  # "Extract facts" stays available
 
 
+def _board_card(card_id):
+    return next(c for c in board_service.get_board_state("P")["cards"] if c["id"] == card_id)
+
+
+def test_after_an_automatic_extraction_that_saved_facts_the_board_offers_no_button(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _ScriptedClient(_review("COMPLETE"), _facts_answer()))
+    supervisor_service.review_card("P", card_id)
+    assert _board_card(card_id)["can_extract_facts"] is False
+
+
+def test_after_an_automatic_extraction_that_failed_the_board_offers_the_button(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    failure = anthropic.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+    _install(monkeypatch, _ScriptedClient(_review("COMPLETE"), failure))
+    supervisor_service.review_card("P", card_id)
+    card = _board_card(card_id)
+    assert (card["status"], card["can_extract_facts"]) == ("COMPLETE", True)
+
+
 def test_a_review_of_a_report_already_being_mined_makes_no_second_call(temp_db, app_context, monkeypatch):
     pid = projects_repo.get_or_create_id("P")
     card_id = _running_card(pid)

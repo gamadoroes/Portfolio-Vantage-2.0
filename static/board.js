@@ -34,7 +34,8 @@
     }
     function newView() {
         return { filter: 'all', closedPhases: {}, editing: {}, drafts: {}, cardErrors: {}, adding: null,
-                 confirming: false, busy: false, supervisorNote: '', message: '', objEdit: false, objDraft: null };
+                 confirming: false, busy: false, supervisorNote: '', message: '', objEdit: false, objDraft: null,
+                 confirmExtract: null, extracting: {} };
     }
     function pluralise(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
     function filterMatches(card, key) { return (FILTERS.find(f => f.key === key) || FILTERS[0]).test(card); }
@@ -161,11 +162,23 @@
     function reportButton(card) {
         return card.run && card.run.has_report ? `<button type="button" class="rb-btn" data-act="report" data-id="${card.id}">Read report</button>` : '';
     }
-    function reviewHtml(card) {
+    const EXTRACT_CONFIRM = 'Take the facts from this report? This makes one paid Claude call.';
+    function extractHtml(card, view) {
+        if (!card.can_extract_facts) return '';
+        const id = card.id;
+        if (view.extracting && view.extracting[id]) return '<div class="rb-row"><button type="button" class="rb-btn" disabled>Extracting facts…</button></div>';
+        if (view.confirmExtract === id) {
+            return `<div class="rb-confirm" role="group" aria-label="Confirm extract facts"><p class="rb-small">${EXTRACT_CONFIRM}</p>`
+                + `<div class="rb-row"><button type="button" class="rb-btn primary" data-act="extract-start" data-id="${id}">Extract facts</button>`
+                + `<button type="button" class="rb-btn" data-act="extract-cancel" data-id="${id}">Not yet</button></div></div>`;
+        }
+        return `<div class="rb-row"><button type="button" class="rb-btn" data-act="extract-open" data-id="${id}">Extract facts</button><span class="rb-hint">Saves this report's facts to Insights.</span></div>`;
+    }
+    function reviewHtml(card, view) {
         const meters = meter('Completeness', card.completeness_score) + meter('Evidence', card.evidence_score);
         const gaps = (card.gaps || []).length ? `<div><h5>Gaps the Supervisor found</h5><ul>${card.gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></div>` : '';
         const file = card.run && card.run.report_filename ? `<p class="rb-hint">Saved to your sources as “${esc(card.run.report_filename)}” and linked to this phase.</p>` : '';
-        return `<div class="rb-review"><h5>Supervisor review</h5>${meters ? `<div class="rb-meters">${meters}</div>` : ''}${gaps}${file}<div class="rb-row">${reportButton(card)}</div></div>`;
+        return `<div class="rb-review"><h5>Supervisor review</h5>${meters ? `<div class="rb-meters">${meters}</div>` : ''}${gaps}${file}<div class="rb-row">${reportButton(card)}</div>${extractHtml(card, view)}</div>`;
     }
     function runningText(card) {
         if (card.research_method === 'TARGETED_WEB') return 'Searching and reading sources';
@@ -193,14 +206,14 @@
                 if (card.research_method === 'SYNTHESIS') {
                     return `<p class="rb-hint">Saved to Insights, Phase 7.</p><div class="rb-row">${reportButton(card)}</div>`;
                 }
-                return linksHtml(card) + reviewHtml(card);
+                return linksHtml(card) + reviewHtml(card, view);
             case 'WAITING_FOR_HUMAN':
-                return reviewHtml(card) + '<p class="rb-hint">The Supervisor wasn\'t sure about this one. What do you think?</p>'
+                return reviewHtml(card, view) + '<p class="rb-hint">The Supervisor wasn\'t sure about this one. What do you think?</p>'
                     + `<div class="rb-row">${btn('accept', 'Accept as finished', 'primary')}${btn('needs-followup', 'Needs follow-up')}${btn('mark-failed', 'Mark failed', 'quiet')}</div>`;
             case 'FAILED': {
                 const atLimit = card.retry_count >= card.max_retries;
                 const error = (card.run && card.run.error) || 'This research did not produce a usable result.';
-                return `<p class="rb-err">${esc(error)}</p>${(card.gaps || []).length ? reviewHtml(card) : ''}`
+                return `<p class="rb-err">${esc(error)}</p>${(card.gaps || []).length ? reviewHtml(card, view) : ''}`
                     + `<div class="rb-row">${btn('retry', 'Retry', 'primary', atLimit)}${btn('back-to-draft', 'Back to draft')}${btn('skip', 'Skip', 'quiet')}</div>`
                     + (atLimit ? `<p class="rb-hint">It has failed ${card.retry_count} times. Move it back to draft to change it, or skip it.</p>` : '');
             }
@@ -316,8 +329,15 @@
             + `<div class="rb-grid">${objectiveHtml(state, view)}<section class="rb-plan" aria-label="Plan">${plan}</section>${runBoxHtml(state, view)}${activityHtml(state)}</div>`;
     }
 
+    // The report reader's header. "Extract facts" shows only while the report's facts can still be taken.
+    function readerHeadHtml(report) {
+        const extract = report.can_extract_facts ? '<button type="button" class="rb-btn" data-reader-extract>Extract facts</button>' : '';
+        return `<div class="rb-reader-head"><h3>${esc(report.title)}</h3><div class="rb-reader-actions">${extract}<button type="button" class="rb-btn" data-reader-close>Close</button></div></div>`;
+    }
+
     const pure = { STATUS, esc, newView, filterMatches, formatElapsed, pluralise, cardHtml, phaseHtml,
-                   runBoxHtml, chipsHtml, renderBoard, editPayload, cardEdits, addPayload, objectiveHtml };
+                   runBoxHtml, chipsHtml, renderBoard, editPayload, cardEdits, addPayload, objectiveHtml,
+                   extractHtml, EXTRACT_CONFIRM, readerHeadHtml };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -538,6 +558,22 @@
         accept: simple('accept'),
         'needs-followup': simple('needs-followup'),
         'mark-failed': simple('mark-failed'),
+        'extract-open'(el) { board.view.confirmExtract = Number(el.dataset.id); render(); },
+        'extract-cancel'() { board.view.confirmExtract = null; render(); },
+        'extract-start'(el) {
+            const id = Number(el.dataset.id);
+            board.view.confirmExtract = null;
+            attempt(id, async project => {
+                board.view.extracting[id] = true;
+                render();
+                let data;
+                try { data = await cardAction(project, id, 'extract-facts'); }
+                finally { delete board.view.extracting[id]; }
+                if (project !== board.project) return;
+                board.view.message = data.note || '';
+                takeState(data);
+            });
+        },
         add(el) {
             board.view.adding = { phase_key: el.dataset.phase, draft_prompt: true, research_method: 'TARGETED_WEB' };
             render();
@@ -652,10 +688,37 @@
         overlay.setAttribute('aria-label', report.title);
         const body = typeof renderMarkdown === 'function' ? renderMarkdown(report.text) : `<pre>${esc(report.text)}</pre>`;
         const file = report.filename ? `<p class="rb-hint">Saved in your sources as “${esc(report.filename)}”.</p>` : '';
-        overlay.innerHTML = `<div class="rb-reader-box"><div class="rb-reader-head"><h3>${esc(report.title)}</h3><button type="button" class="rb-btn" data-reader-close>Close</button></div><div class="rb-reader-body markdown-body">${file}${body}</div></div>`;
-        overlay.addEventListener('click', e => { if (e.target === overlay || e.target.closest('[data-reader-close]')) closeReader(); });
+        overlay.innerHTML = `<div class="rb-reader-box">${readerHeadHtml(report)}<div class="rb-reader-body markdown-body">${file}${body}</div></div>`;
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay || e.target.closest('[data-reader-close]')) closeReader();
+            else if (e.target.closest('[data-reader-extract]')) extractFromReader(report, e.target.closest('[data-reader-extract]'));
+        });
         document.body.appendChild(overlay);
         overlay.querySelector('[data-reader-close]').focus();
+    }
+    // The reader's own Extract facts button. The note and any error are set as text.
+    async function extractFromReader(report, button) {
+        if (!window.confirm(EXTRACT_CONFIRM)) return;
+        const project = board.project;
+        const old = button.parentNode.querySelector('.rb-err');
+        if (old) old.remove();
+        button.disabled = true;
+        button.textContent = 'Extracting facts…';
+        try {
+            const data = await cardAction(project, report.id, 'extract-facts');
+            const note = document.createElement('span');
+            note.className = 'rb-small';
+            note.textContent = data.note || 'Done.';
+            button.replaceWith(note);
+            if (project === board.project) { board.view.message = data.note || ''; takeState(data); }
+        } catch (err) {
+            button.disabled = false;
+            button.textContent = 'Extract facts';
+            const message = document.createElement('span');
+            message.className = 'rb-err';
+            message.textContent = err.message;
+            button.before(message);
+        }
     }
     function closeReader() { const el = document.getElementById('rb-reader'); if (el) el.remove(); }
 

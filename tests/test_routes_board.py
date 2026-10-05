@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 
 from app import create_app
@@ -162,3 +164,44 @@ def test_run_starts_more_than_twenty_cards(client, monkeypatch):
     resp = client.post("/api/board/run", json={"project": "P", "card_ids": ids})
     assert resp.status_code == 200
     assert resp.get_json()["result"]["started"] == ids
+
+
+def test_extract_facts_saves_facts_and_explains_itself(client, monkeypatch):
+    card_id = _card(status="COMPLETE")
+    pid = projects_repo.get_or_create_id("P")
+    research_runs_repo.create(f"run_{card_id}", pid, None, None, "p")
+    research_runs_repo.update(f"run_{card_id}", research_work_item_id=card_id, status="completed",
+                              output_text="Deakin charges $3,000 per unit.")
+    block = _Block("record_research_facts", {"facts": [{"claim": "Deakin charges $3,000 per unit",
+                                                        "source_url": "https://deakin.example/fees"}]})
+    calls = []
+    fake = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: calls.append(kw) or SimpleNamespace(content=[block])))
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: fake)
+    resp = client.post(f"/api/board/cards/{card_id}/extract-facts", json={"project": "P"})
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["note"].startswith("Saved 1 fact and 0 conclusions.")
+    card = next(c for c in body["board"]["cards"] if c["id"] == card_id)
+    assert (card["can_extract_facts"], card["status"]) == (False, "COMPLETE")
+    again = client.post(f"/api/board/cards/{card_id}/extract-facts", json={"project": "P"})
+    assert again.status_code == 409 and len(calls) == 1
+
+
+def test_extract_facts_on_a_card_without_a_report_is_409(client):
+    assert client.post(f"/api/board/cards/{_card(status='COMPLETE')}/extract-facts", json={"project": "P"}).status_code == 409
+
+
+def test_extract_facts_when_claude_is_unreachable_says_so_plainly_and_keeps_the_button(client, monkeypatch):
+    card_id = _card(status="COMPLETE")
+    pid = projects_repo.get_or_create_id("P")
+    research_runs_repo.create(f"run_{card_id}", pid, None, None, "p")
+    research_runs_repo.update(f"run_{card_id}", research_work_item_id=card_id, status="completed", output_text="A report.")
+
+    def down(**kwargs):
+        raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: SimpleNamespace(messages=SimpleNamespace(create=down)))
+    resp = client.post(f"/api/board/cards/{card_id}/extract-facts", json={"project": "P"})
+    assert resp.status_code == 503
+    assert resp.get_json()["error"] == "Couldn't take facts from this report just now. Try again shortly."
+    board = client.get("/api/board?project=P").get_json()["board"]
+    assert next(c for c in board["cards"] if c["id"] == card_id)["can_extract_facts"] is True

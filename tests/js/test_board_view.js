@@ -10,6 +10,7 @@ function card(over) {
         rationale: 'Price drives choice', priority: null, suggested_from: null, followups: [], depends_on: [],
         completeness_score: null, evidence_score: null, gaps: [], human_review_required: false,
         retry_count: 0, max_retries: 3, run: null, review_error: null,
+        can_extract_facts: false,
     }, over || {});
 }
 function state(cards, over) {
@@ -132,6 +133,35 @@ test('objective editor shows the unsaved draft, escaped, in preference to the sa
 test('whole board renders', () => {
     const html = B.renderBoard(state([card(), card({ id: 8, status: 'SKIPPED', title: 'Old' })]), view());
     assert(html.includes('Research plan') && html.includes('Draft next researches') && html.includes('Skipped (1)'));
+});
+
+test('a finished card with no facts yet offers Extract facts, warning that it is a paid call', () => {
+    const c = card({ status: 'COMPLETE', can_extract_facts: true, run: { has_report: true } });
+    assert(B.cardHtml(c, state([]), view()).includes('data-act="extract-open"'));
+    const v = view(); v.confirmExtract = 7;
+    const html = B.cardHtml(c, state([]), v);
+    assert(html.includes('one paid Claude call') && html.includes('data-act="extract-start"') && html.includes('data-act="extract-cancel"'));
+    v.extracting[7] = true;
+    const busy = B.cardHtml(c, state([]), v);
+    assert(busy.includes('Extracting facts') && !busy.includes('data-act="extract-start"'));
+});
+test('no Extract facts once the facts were taken', () => {
+    const html = B.cardHtml(card({ status: 'COMPLETE', can_extract_facts: false, run: { has_report: true } }), state([]), view());
+    assert(!html.includes('extract-open'));
+});
+test('a card waiting for your review can extract facts too', () => {
+    assert(B.cardHtml(card({ status: 'WAITING_FOR_HUMAN', can_extract_facts: true }), state([]), view()).includes('data-act="extract-open"'));
+});
+test('the report reader shows Extract facts only when facts can still be taken', () => {
+    const shown = B.readerHeadHtml({ id: 7, title: 'Fees', can_extract_facts: true });
+    assert(shown.includes('data-reader-extract') && shown.includes('data-reader-close'));
+    const hidden = B.readerHeadHtml({ id: 7, title: 'Fees', can_extract_facts: false });
+    assert(!hidden.includes('data-reader-extract') && hidden.includes('data-reader-close'));
+    assert(!B.readerHeadHtml({ id: 7, title: 'Fees' }).includes('data-reader-extract'));
+});
+test('the report reader escapes the title', () => {
+    const html = B.readerHeadHtml({ id: 7, title: '<img src=x onerror=alert(1)>', can_extract_facts: true });
+    assert(!html.includes('<img') && html.includes('&lt;img'));
 });
 
 let failed = 0;

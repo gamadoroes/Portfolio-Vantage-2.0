@@ -527,3 +527,45 @@ def test_activity_shows_the_you_extracted_facts_line(pid):
                                 research_work_item_id=card_id)
     assert board_service.get_board_state("P")["activity"][0] == {
         **board_service.get_board_state("P")["activity"][0], "actor": "you", "text": 'You extracted facts from "Fees".'}
+
+
+# ---- extract facts ----
+
+def _finished(pid, status="COMPLETE", method="TARGETED_WEB", phase="4", output="The report."):
+    card_id = _card(pid, status=status, method=method, phase=phase)
+    research_runs_repo.create(f"run_{card_id}", pid, None, None, "p")
+    research_runs_repo.update(f"run_{card_id}", research_work_item_id=card_id, status="completed", output_text=output)
+    return card_id
+
+
+def _can_extract(card_id):
+    return next(c for c in board_service.get_board_state("P")["cards"] if c["id"] == card_id)["can_extract_facts"]
+
+
+@pytest.mark.parametrize("status", ["COMPLETE", "FOLLOW_UP_REQUIRED", "WAITING_FOR_HUMAN"])
+def test_finished_research_offers_extract_facts_until_its_facts_are_taken(pid, status):
+    card_id = _finished(pid, status=status)
+    assert _can_extract(card_id) is True
+    research_runs_repo.claim_facts_extraction(f"run_{card_id}")
+    assert _can_extract(card_id) is False
+
+
+def test_no_extract_facts_without_a_report_or_for_the_options_report(pid):
+    cards = [_finished(pid, status="RUNNING"), _card(pid, status="COMPLETE"), _finished(pid, output=""),
+             _finished(pid, method="SYNTHESIS", phase="7")]
+    assert [_can_extract(c) for c in cards] == [False, False, False, False]
+
+
+def test_the_report_reader_knows_whether_facts_can_be_extracted(pid):
+    card_id = _finished(pid)
+    report = board_service.get_report("P", card_id)
+    assert (report["id"], report["can_extract_facts"]) == (card_id, True)
+    research_runs_repo.claim_facts_extraction(f"run_{card_id}")
+    assert board_service.get_report("P", card_id)["can_extract_facts"] is False
+
+
+def test_extract_note():
+    assert board_service.extract_note({"fact_ids": [1, 2], "conclusion_ids": [3], "skipped": []}) == (
+        "Saved 2 facts and 1 conclusion. You'll find them on the Insights tab, under this research's phase.")
+    assert board_service.extract_note({"fact_ids": [], "conclusion_ids": [], "skipped": []}) == (
+        "No facts could be taken from this report, so nothing was saved. You can try again.")

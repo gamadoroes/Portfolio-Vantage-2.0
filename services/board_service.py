@@ -28,6 +28,7 @@ from .prompt_drafting_service import FALLBACK_MARKER, create_drafted_card, draft
 from .prompt_frameworks import FRAMEWORK_LABELS, frameworks_for_phase
 from .text_utils import as_text_list
 from .tools import run_tool
+from .tools.research_facts import can_extract_facts
 
 STALE_REVIEW_CLAIM_SECONDS = 600
 ACTIVITY_LIMIT = 30
@@ -247,6 +248,28 @@ def mark_failed(project_name, card_id):
     _status(project_name, card_id, "mark_failed")
 
 
+EXTRACT_FAILED = "Couldn't take facts from this report just now. Try again shortly."
+
+
+def extract_facts(project_name, card_id):
+    """The "Extract facts" button. One paid Claude call; the tool makes sure a report is only paid for once.
+    The card's state or an earlier extraction (CardNotFound, BoardStateError) pass through as they are."""
+    try:
+        return _user_tool(project_name, "extract_research_facts", {"task_id": card_id})
+    except DraftingUnavailable as exc:
+        raise DraftingUnavailable(EXTRACT_FAILED) from exc
+    except RuntimeError as exc:
+        raise RuntimeError(EXTRACT_FAILED) from exc
+
+
+def extract_note(result):
+    facts, conclusions = len(result["fact_ids"]), len(result["conclusion_ids"])
+    if not facts:
+        return "No facts could be taken from this report, so nothing was saved. You can try again."
+    return (f"Saved {_count(facts, 'fact', 'facts')} and {_count(conclusions, 'conclusion', 'conclusions')}. "
+            "You'll find them on the Insights tab, under this research's phase.")
+
+
 ACTIONS = {
     "approve": approve, "unapprove": unapprove, "skip": skip, "restore": restore, "retry": retry,
     "back-to-draft": back_to_draft, "redraft": redraft, "accept": accept,
@@ -321,7 +344,8 @@ def get_report(project_name, card_id):
     if run_row["report_stable_file_id"]:
         source = sources_repo.get_by_stable_id(card["project_id"], run_row["report_stable_file_id"])
         filename = source["filename"] if source else None
-    return {"title": card["title"], "text": run_row["output_text"], "filename": filename}
+    return {"id": card["id"], "title": card["title"], "text": run_row["output_text"], "filename": filename,
+            "can_extract_facts": can_extract_facts(card, run_row)}
 
 
 # ---- refresh ----
@@ -467,7 +491,8 @@ def _card_state(project_id, card, cards, by_id, run_row, last_review_event):
         "gaps": _json_text_list(card["identified_gaps_json"]),
         "human_review_required": bool(card["human_review_required"]),
         "retry_count": card["retry_count"], "max_retries": card["max_retries"],
-        "run": _run_state(project_id, run_row), "review_error": review_error,
+        "run": _run_state(project_id, run_row), "can_extract_facts": can_extract_facts(card, run_row),
+        "review_error": review_error,
         "created_at": card["created_at"], "updated_at": card["updated_at"],
     }
 
