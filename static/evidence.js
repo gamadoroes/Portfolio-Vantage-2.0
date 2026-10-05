@@ -135,12 +135,93 @@
         return wrap;
     }
 
-    const pure = { safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState };
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+    // The screen's behaviour, with the document, the fetch helper and the timers passed in so the Node tests can
+    // drive it with fakes. Every async step checks that the project (and, for search, the search itself) is still
+    // the one it started for before it paints anything.
+    function createController(env) {
+        const doc = env.document;
+        const ev = { project: null, seq: 0, searchSeq: 0, timer: null, rejectedOpen: createOpenState() };
+        const slots = () => Array.from(doc.querySelectorAll('[data-evidence-phase]'));
+
+        function resetSearch() {
+            env.clearTimeout(ev.timer);  // a pending debounce must not fire against whatever project comes next
+            ev.searchSeq++;              // and a search already in flight must not paint when it comes back
+            const input = doc.getElementById('evidence-search-input');
+            const out = doc.getElementById('evidence-search-results');
+            if (input) input.value = '';
+            if (out) clear(out);
+        }
+
+        async function renderAll(project) {
+            if (project !== ev.project) { ev.project = project; ev.rejectedOpen = createOpenState(); resetSearch(); }
+            const seq = ++ev.seq;
+            if (!project || !slots().length) return;
+            let data;
+            try {
+                data = await env.call('GET', `/api/evidence?project=${encodeURIComponent(project)}`);
+            } catch (err) {
+                if (seq !== ev.seq) return;
+                slots().forEach(slot => { clear(slot); slot.appendChild(el(doc, 'p', 'ev-err', err.message)); });
+                return;
+            }
+            if (seq !== ev.seq || project !== ev.project) return;
+            slots().forEach(slot => {
+                clear(slot);
+                const phase = slot.getAttribute('data-evidence-phase');
+                slot.appendChild(phaseEvidenceNode(doc, data.phases[phase], ev.rejectedOpen.get(phase)));
+            });
+        }
+
+        async function runSearch(words) {
+            const out = doc.getElementById('evidence-search-results');
+            if (!out) return;
+            const seq = ++ev.searchSeq;
+            const project = ev.project;
+            if (!project || !words.trim()) { clear(out); return; }
+            let node;
+            try {
+                const data = await env.call('GET', `/api/evidence/search?project=${encodeURIComponent(project)}&q=${encodeURIComponent(words)}`);
+                node = searchResultsNode(doc, data.facts || [], words);
+            } catch (err) {
+                node = el(doc, 'p', 'ev-err', err.message);
+            }
+            if (seq !== ev.searchSeq || project !== ev.project) return;
+            clear(out);
+            out.appendChild(node);
+        }
+
+        function onSearchInput(words) {
+            env.clearTimeout(ev.timer);
+            ev.timer = env.setTimeout(() => runSearch(words), 300);
+        }
+
+        // A Reject or Restore button was clicked. One error message at a time: a retry replaces the last one.
+        async function onAction(button) {
+            if (!button || button.disabled || !ev.project) return;
+            const project = ev.project;
+            button.disabled = true;
+            try {
+                await env.call('POST', `/api/evidence/${button.getAttribute('data-ev-kind')}/${button.getAttribute('data-ev-id')}/${button.getAttribute('data-ev-act')}`, { project });
+                if (project === ev.project) renderAll(project);
+            } catch (err) {
+                button.disabled = false;
+                const parent = button.parentNode;
+                if (parent) Array.from(parent.children).filter(c => c.className === 'ev-err').forEach(c => parent.removeChild(c));
+                button.after(el(doc, 'span', 'ev-err', err.message));
+            }
+        }
+
+        function rememberRejectedBox(phase, open) { ev.rejectedOpen.set(phase, open); }
+
+        return { renderAll, runSearch, resetSearch, onSearchInput, onAction, rememberRejectedBox };
+    }
+
+    const pure = { safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
-    const ev = { project: null, seq: 0, searchSeq: 0, timer: null, rejectedOpen: createOpenState() };
-
     async function call(method, url, body) {
         const options = { method };
         if (body !== undefined) { options.headers = { 'Content-Type': 'application/json' }; options.body = JSON.stringify(body); }
@@ -150,58 +231,14 @@
         if (!res.ok || !data || data.success === false) throw new Error((data && data.error) || `Something went wrong (${res.status}).`);
         return data;
     }
-    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-    function slots() { return Array.from(document.querySelectorAll('[data-evidence-phase]')); }
-
-    function resetSearch() {
-        const input = document.getElementById('evidence-search-input');
-        const out = document.getElementById('evidence-search-results');
-        if (input) input.value = '';
-        if (out) clear(out);
-    }
-
-    async function renderAll(project) {
-        if (project !== ev.project) { ev.project = project; ev.rejectedOpen = createOpenState(); resetSearch(); }
-        const seq = ++ev.seq;
-        if (!project || !slots().length) return;
-        let data;
-        try {
-            data = await call('GET', `/api/evidence?project=${encodeURIComponent(project)}`);
-        } catch (err) {
-            if (seq !== ev.seq) return;
-            slots().forEach(slot => { clear(slot); slot.appendChild(el(document, 'p', 'ev-err', err.message)); });
-            return;
-        }
-        if (seq !== ev.seq || project !== ev.project) return;
-        slots().forEach(slot => {
-            clear(slot);
-            const phase = slot.getAttribute('data-evidence-phase');
-            slot.appendChild(phaseEvidenceNode(document, data.phases[phase], ev.rejectedOpen.get(phase)));
-        });
-    }
-
-    async function runSearch(words) {
-        const out = document.getElementById('evidence-search-results');
-        if (!out) return;
-        const seq = ++ev.searchSeq;
-        if (!ev.project || !words.trim()) { clear(out); return; }
-        let node;
-        try {
-            const data = await call('GET', `/api/evidence/search?project=${encodeURIComponent(ev.project)}&q=${encodeURIComponent(words)}`);
-            node = searchResultsNode(document, data.facts || [], words);
-        } catch (err) {
-            node = el(document, 'p', 'ev-err', err.message);
-        }
-        if (seq !== ev.searchSeq) return;
-        clear(out);
-        out.appendChild(node);
-    }
+    const screen = createController({
+        document, call,
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: id => window.clearTimeout(id),
+    });
 
     document.addEventListener('input', event => {
-        if (!event.target || event.target.id !== 'evidence-search-input') return;
-        clearTimeout(ev.timer);
-        const words = event.target.value;
-        ev.timer = setTimeout(() => runSearch(words), 300);
+        if (event.target && event.target.id === 'evidence-search-input') screen.onSearchInput(event.target.value);
     });
 
     // "toggle" does not bubble, so listen in the capture phase to remember each phase's Show rejected box.
@@ -209,10 +246,10 @@
         const box = event.target;
         if (!box || !box.classList || !box.classList.contains('ev-rejected')) return;
         const slot = box.closest('[data-evidence-phase]');
-        if (slot) ev.rejectedOpen.set(slot.getAttribute('data-evidence-phase'), box.open);
+        if (slot) screen.rememberRejectedBox(slot.getAttribute('data-evidence-phase'), box.open);
     }, true);
 
-    document.addEventListener('click', async event => {
+    document.addEventListener('click', event => {
         const target = event.target;
         if (!target || !target.closest) return;
         const ref = target.closest('a.ev-ref');
@@ -223,17 +260,9 @@
             return;
         }
         const button = target.closest('[data-ev-act]');
-        if (!button || button.disabled || !ev.project) return;
-        const project = ev.project;
-        button.disabled = true;
-        try {
-            await call('POST', `/api/evidence/${button.getAttribute('data-ev-kind')}/${button.getAttribute('data-ev-id')}/${button.getAttribute('data-ev-act')}`, { project });
-            if (project === ev.project) renderAll(project);
-        } catch (err) {
-            button.disabled = false;
-            button.after(el(document, 'span', 'ev-err', err.message));
-        }
+        if (button) screen.onAction(button);
     });
 
-    window.evidenceRenderAll = renderAll;
+    window.evidenceRenderAll = screen.renderAll;
+    window.evidenceResetSearch = screen.resetSearch;
 })();

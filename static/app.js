@@ -1105,6 +1105,8 @@ function resetInsightsUI() {
     if (downloadReportBtn) downloadReportBtn.style.display = 'none';
     const nav = document.getElementById('insights-version-nav');
     if (nav) nav.style.display = 'none';
+    // The fact search box and its results belong to the project that was showing; clear them on a switch.
+    if (typeof evidenceResetSearch === 'function') evidenceResetSearch();
     renderExcludedCompetitors();
     syncInsightsControlButtons();
 }

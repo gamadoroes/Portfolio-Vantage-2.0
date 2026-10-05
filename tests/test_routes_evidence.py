@@ -95,9 +95,14 @@ def test_unknown_things_are_404(client, url):
 
 
 def test_no_project_is_400(client):
-    assert client.get("/api/evidence?project=Nope").status_code == 400
-    assert client.get("/api/evidence/search?project=Nope&q=x").status_code == 400
-    assert client.post("/api/evidence/fact/1/reject", json={"project": "Nope"}).status_code == 400
+    responses = [
+        client.get("/api/evidence?project=Nope"),
+        client.get("/api/evidence/search?project=Nope&q=x"),
+        client.post("/api/evidence/fact/1/reject", json={"project": "Nope"}),
+    ]
+    for response in responses:
+        assert response.status_code == 400
+        assert response.get_json() == {"success": False, "error": "No project selected."}
 
 
 def test_the_page_loads_the_evidence_script_and_search_box(client):

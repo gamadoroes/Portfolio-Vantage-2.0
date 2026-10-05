@@ -7,7 +7,10 @@ const E = require('../../static/evidence.js');
 // A tiny DOM: enough for evidence.js, and it refuses innerHTML outright.
 class FakeNode {
     constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.className = ''; this.ownText = ''; }
-    appendChild(child) { this.children.push(child); return child; }
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+    get firstChild() { return this.children[0] || null; }
+    removeChild(child) { this.children = this.children.filter(c => c !== child); child.parentNode = null; return child; }
+    after(node) { const siblings = this.parentNode.children; node.parentNode = this.parentNode; siblings.splice(siblings.indexOf(this) + 1, 0, node); }
     setAttribute(name, value) { this.attributes[name] = String(value); }
     getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
     set textContent(value) { this.ownText = String(value); this.children = []; }
@@ -15,6 +18,28 @@ class FakeNode {
     set innerHTML(value) { throw new Error('evidence.js must never set innerHTML'); }
 }
 const doc = { createElement: tag => new FakeNode(tag) };
+
+// A page for the controller: a search input and results box, and a slot for each phase.
+function makePage(phases) {
+    const page = { input: new FakeNode('input'), results: new FakeNode('div'), slots: phases.map(key => { const s = new FakeNode('div'); s.setAttribute('data-evidence-phase', key); return s; }) };
+    page.input.value = 'typed words';
+    page.document = {
+        createElement: tag => new FakeNode(tag),
+        getElementById: id => (id === 'evidence-search-input' ? page.input : id === 'evidence-search-results' ? page.results : null),
+        querySelectorAll: () => page.slots,
+    };
+    return page;
+}
+// Timers you fire by hand, and requests you answer by hand.
+function makeEnv(page) {
+    const env = { timers: [], requests: [] };
+    env.document = page.document;
+    env.setTimeout = fn => { env.timers.push(fn); return env.timers.length; };
+    env.clearTimeout = id => { if (id) env.timers[id - 1] = null; };
+    env.call = (method, url, body) => new Promise((resolve, reject) => env.requests.push({ method, url, body, resolve, reject }));
+    return env;
+}
+const flush = () => new Promise(resolve => setImmediate(resolve));
 const all = (node, test, out = []) => { if (test(node)) out.push(node); node.children.forEach(c => all(c, test, out)); return out; };
 const tagged = (node, tag) => all(node, n => n.tagName === tag.toUpperCase());
 
@@ -116,9 +141,74 @@ test('the open state is kept apart for each phase', () => {
     assert.deepStrictEqual(['1', '2', '3'].map(key => state.get(key)), [false, false, true]);
 });
 
+test('a search that finishes after a project change paints nothing', async () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('Old');
+    const search = screen.runSearch('deakin');
+    assert.strictEqual(env.requests.length, 2);                    // the evidence list and the search, both for Old
+    screen.renderAll('New');                                       // the person switches project
+    assert.strictEqual(page.input.value, '');                      // search box cleared
+    env.requests[1].resolve({ success: true, facts: [fact()] });   // the old search comes back late
+    await search; await flush();
+    assert.strictEqual(page.results.children.length, 0);
+});
+test('a search that finishes after the search was reset paints nothing', async () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P');
+    const search = screen.runSearch('deakin');
+    screen.resetSearch();
+    env.requests[1].resolve({ success: true, facts: [fact()] });
+    await search;
+    assert.strictEqual(page.results.children.length, 0);
+});
+test('a search for the current project still paints', async () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P');
+    const search = screen.runSearch('deakin');
+    env.requests[1].resolve({ success: true, facts: [fact()] });
+    await search;
+    assert(page.results.textContent.includes('1 fact matches'));
+});
+test('a pending search timer is cancelled by a project change and never fires', () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('Old');
+    const before = env.requests.length;
+    screen.onSearchInput('deak');                                  // the debounce timer is waiting
+    const waiting = env.timers[0];
+    assert.strictEqual(typeof waiting, 'function');
+    screen.renderAll('New');                                       // the project change resets the search
+    assert.strictEqual(env.timers[0], null);                       // so the timer was cleared and cannot fire
+    assert.strictEqual(env.requests.filter(r => r.url.includes('/search')).length, 0);
+    assert.strictEqual(env.requests.length, before + 1);           // only New's evidence list was requested
+});
+test('typing again replaces the waiting search timer', () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P'); screen.onSearchInput('d'); screen.onSearchInput('de');
+    assert.strictEqual(env.timers[0], null);
+    assert.strictEqual(typeof env.timers[1], 'function');
+});
+test('a failed Reject or Restore shows one error message, replaced on each retry', async () => {
+    const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P');
+    env.requests[0].resolve({ success: true, phases: { 4: { facts: [fact()], conclusions: [] } } });
+    await flush();
+    const [button] = tagged(page.slots[0], 'button');
+    for (const message of ['First failure', 'Second failure']) {
+        const done = screen.onAction(button);
+        env.requests[env.requests.length - 1].reject(new Error(message));
+        await done;
+    }
+    const errors = all(button.parentNode, n => n.className === 'ev-err');
+    assert.strictEqual(errors.length, 1);
+    assert.strictEqual(errors[0].textContent, 'Second failure');
+    assert.strictEqual(button.disabled, false);
+});
+
+(async () => {
 let failed = 0;
 for (const [name, fn] of tests) {
-    try { fn(); console.log('ok -', name); } catch (e) { failed++; console.log('FAIL -', name, '\n ', e.message); }
+    try { await fn(); console.log('ok -', name); } catch (e) { failed++; console.log('FAIL -', name, '\n ', e.message); }
 }
 if (failed) { console.log(`${failed} failed`); process.exit(1); }
 console.log(`all ${tests.length} passed`);
+})();
