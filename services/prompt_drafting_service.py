@@ -105,5 +105,6 @@ def create_drafted_card(
         suggested_from_work_item_id=suggested_from_work_item_id,
     )
     draft = draft_prompt(project_name, phase_key, resolved, title, focus=focus, rationale=rationale)
-    research_work_items_repo.update_fields(card_id, prompt_text=draft["prompt_text"])
+    # The card already exists during the slow draft; a prompt the user wrote meanwhile wins.
+    research_work_items_repo.fill_empty_draft_prompt(card_id, draft["prompt_text"])
     return {"card_id": card_id, "drafted": draft["drafted"]}

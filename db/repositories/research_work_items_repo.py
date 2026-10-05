@@ -98,6 +98,23 @@ def update_editable(id, expected_updated_at=None, **fields):
         return cur.rowcount == 1
 
 
+def fill_empty_draft_prompt(id, prompt_text):
+    """Set the prompt of a new draft card, only if it is still a draft with no prompt.
+
+    A card is created before its prompt is drafted (a slow Claude call). If the user wrote
+    their own prompt or approved the card meanwhile, their version wins and nothing changes.
+    Returns True only if this call made the change.
+    """
+    now = datetime.now().isoformat()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE research_work_items SET prompt_text = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'PROPOSED' AND (prompt_text IS NULL OR TRIM(prompt_text) = '')",
+            (prompt_text, now, id),
+        )
+        return cur.rowcount == 1
+
+
 def claim_status_if_unchanged(id, from_status, to_status, updated_at):
     """Like claim_status, but only if the card has not been touched since it was read.
 

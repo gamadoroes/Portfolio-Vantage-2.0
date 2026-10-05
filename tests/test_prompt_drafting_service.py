@@ -69,3 +69,41 @@ def test_create_drafted_card_creates_a_proposed_card_with_its_prompt(project, mo
     assert row["research_method"] == "TARGETED_WEB"
     assert row["rationale"] == "Covers competitors"
     assert row["prompt_text"].startswith("ROLE: analyst.")
+
+
+USER_PROMPT = "My own prompt: research every provider's website and cite all sources used."
+
+
+def _act_during_drafting(monkeypatch, action):
+    def fake(system_prompt, user_message, max_tokens=4000):
+        card = research_work_items_repo.list_for_project(projects_repo.get_id("P"))[0]
+        action(card["id"])
+        return "ROLE: analyst. Drafted prompt that arrives after the user acted."
+    monkeypatch.setattr(llm_service, "prompt_completion", fake)
+
+
+def test_a_prompt_written_and_approved_during_drafting_is_kept(project, monkeypatch):
+    from services import board_service
+
+    def write_and_approve(card_id):
+        board_service.edit_card("P", card_id, {"prompt_text": USER_PROMPT})
+        board_service.approve("P", card_id)
+    _act_during_drafting(monkeypatch, write_and_approve)
+    result = prompt_drafting_service.create_drafted_card(
+        project, "3", "Website review", research_method="TARGETED_WEB", framework_key="oes-marketing-website",
+    )
+    row = research_work_items_repo.get(result["card_id"])
+    assert (row["status"], row["prompt_text"]) == ("READY", USER_PROMPT)
+
+
+def test_a_draft_still_fills_a_card_whose_title_was_edited_with_the_prompt_left_empty(project, monkeypatch):
+    from services import board_service
+    _act_during_drafting(monkeypatch, lambda card_id: board_service.edit_card(
+        "P", card_id, {"title": "Website review, renamed", "prompt_text": ""}))
+    result = prompt_drafting_service.create_drafted_card(
+        project, "3", "Website review", research_method="TARGETED_WEB", framework_key="oes-marketing-website",
+    )
+    row = research_work_items_repo.get(result["card_id"])
+    assert row["title"] == "Website review, renamed"
+    assert row["status"] == "PROPOSED"
+    assert row["prompt_text"].startswith("ROLE: analyst. Drafted prompt")
