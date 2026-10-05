@@ -121,3 +121,12 @@ def test_supervisor_only_tools_refuse_the_user(pid, name, inputs):
 
 def test_no_action(pid):
     assert tools.run_tool("no_action", "supervisor", "P", {"reason": "Nothing to add"}).data == {}
+
+
+@pytest.mark.parametrize("name,inputs", [
+    ("create_research_task", {"tasks": [_task(depends_on_existing_ids=[2**70])]}),
+    ("create_followup_task", {"task_id": 0, "title": "Anything"}),
+])
+def test_out_of_range_card_ids_are_invalid_input_and_create_nothing(pid, name, inputs):
+    assert tools.run_tool(name, "supervisor", "P", inputs).error["code"] == "invalid_input"
+    assert research_work_items_repo.list_for_project(pid) == []

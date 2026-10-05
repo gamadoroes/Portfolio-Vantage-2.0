@@ -215,6 +215,13 @@ def test_create_card_drafted_for_me(pid):
     assert row["framework_key"] == "oes-marketing-sentiment"
 
 
+def test_create_card_drafting_ignores_any_typed_prompt(pid):
+    card_id = board_service.create_card("P", {"phase_key": "3", "title": "Sentiment", "research_method": "TARGETED_WEB",
+                                              "prompt_text": GOOD_PROMPT, "draft_prompt": True})
+    prompt = research_work_items_repo.get(card_id)["prompt_text"]
+    assert prompt.startswith("ROLE: analyst.") and prompt != GOOD_PROMPT
+
+
 @pytest.mark.parametrize("data", [
     {"phase_key": "7", "title": "X", "research_method": "TARGETED_WEB"},
     {"phase_key": "4", "title": "  ", "research_method": "TARGETED_WEB"},

@@ -150,12 +150,14 @@ def create_card(project_name, data):
         raise ValueError("Add a title.")
     if method not in USER_METHODS:
         raise ValueError("Choose how it runs: web research or your files.")
+    draft = bool(data.get("draft_prompt"))
     task = {
         "phase_key": phase_key, "title": title, "research_method": method,
         "focus": _clean_focus(data.get("focus")), "rationale": (data.get("rationale") or "").strip(),
         "framework_key": data.get("framework_key") or None,
-        "prompt_text": (data.get("prompt_text") or "").strip() or None,
-        "draft_prompt": bool(data.get("draft_prompt")),
+        # A typed prompt is ignored when the user asked for one to be drafted, as before.
+        "prompt_text": None if draft else (data.get("prompt_text") or "").strip() or None,
+        "draft_prompt": draft,
     }
     return _user_tool(project_name, "create_research_task", {"tasks": [task]})["created_task_ids"][0]
 
