@@ -9,8 +9,6 @@ from db.repositories import agent_decisions_repo, projects_repo, research_runs_r
 from . import research_task_service
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
-from .prompt_drafting_service import create_drafted_card
-from .prompt_frameworks import resolve_framework
 from .review_limits import (
     MAX_CONTEXT_CHARS,
     MAX_REVIEW_OUTPUT_TOTAL_CHARS,
@@ -18,7 +16,7 @@ from .review_limits import (
     MAX_RUN_OUTPUT_REVIEW_CHARS,
 )
 from .text_utils import as_text_list, clip_text
-from .tools import run_tool
+from .tools import claude_tools, run_tool
 
 # Each task line also carries what the card is about, kept short.
 MAX_FOCUS_CHARS = 150
@@ -144,9 +142,6 @@ def format_briefing(state):
     return text
 
 
-DRAFTABLE_PHASES = ("1", "2", "3", "4", "5", "6")
-DRAFTABLE_METHODS = ("TARGETED_WEB", "FILE_ANALYSIS")
-REVIEW_OUTCOMES = ("COMPLETE", "FOLLOW_UP_REQUIRED", "NEEDS_HUMAN", "FAILED")
 MAX_REVIEW_PROMPT_CHARS = 6000
 
 DRAFTING_SYSTEM_PROMPT = (
@@ -161,48 +156,6 @@ DRAFTING_SYSTEM_PROMPT = (
     "Pick the framework that fits each research from the phase's list. Phase 7 is never drafted here."
 )
 
-PROPOSE_TASKS_TOOL = {
-    "name": "propose_tasks",
-    "description": "Draft one or more researches for the person to review. Each becomes a card that needs their approval before it can run.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "tasks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "phase_key": {"type": "string", "enum": list(DRAFTABLE_PHASES)},
-                        "title": {"type": "string"},
-                        "focus": {"type": "array", "items": {"type": "string"}},
-                        "research_method": {"type": "string", "enum": list(DRAFTABLE_METHODS)},
-                        "framework_key": {"type": "string", "description": "One of the frameworks listed for this phase in PHASE DEFINITIONS."},
-                        "rationale": {"type": "string", "description": "One or two plain sentences on why this research is needed now."},
-                        "priority": {"type": "string", "enum": ["low", "medium", "high"]},
-                        "depends_on_existing_ids": {"type": "array", "items": {"type": "integer"}},
-                        "depends_on_batch_indices": {"type": "array", "items": {"type": "integer"}, "description": "Zero-based indices into this same tasks array."},
-                    },
-                    "required": ["phase_key", "title", "research_method", "rationale"],
-                },
-            },
-            "reason": {"type": "string"},
-        },
-        "required": ["tasks", "reason"],
-    },
-}
-
-NO_ACTION_TOOL = {
-    "name": "no_action",
-    "description": "Nothing useful can be drafted right now.",
-    "input_schema": {
-        "type": "object",
-        "properties": {"reason": {"type": "string"}},
-        "required": ["reason"],
-    },
-}
-
-DRAFTING_TOOLS = [PROPOSE_TASKS_TOOL, NO_ACTION_TOOL]
-
 REVIEW_SYSTEM_PROMPT = (
     "You are the research supervisor reviewing ONE finished research for an Australian "
     "higher-education competitive-intelligence project. Judge only what you are shown. Score "
@@ -213,33 +166,6 @@ REVIEW_SYSTEM_PROMPT = (
     "something you were not shown."
 )
 
-REVIEW_TOOL = {
-    "name": "review_outcome",
-    "description": "Record your review of this finished research.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "completeness_score": {"type": "number", "minimum": 0, "maximum": 1},
-            "evidence_score": {"type": "number", "minimum": 0, "maximum": 1},
-            "identified_gaps": {"type": "array", "items": {"type": "string"}},
-            "outcome": {"type": "string", "enum": list(REVIEW_OUTCOMES)},
-            "reason": {"type": "string"},
-            "followup": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "focus": {"type": "array", "items": {"type": "string"}},
-                    "research_method": {"type": "string", "enum": list(DRAFTABLE_METHODS)},
-                    "rationale": {"type": "string"},
-                },
-                "required": ["title"],
-            },
-        },
-        "required": ["completeness_score", "evidence_score", "outcome", "reason"],
-    },
-}
-
-
 def _client():
     return anthropic.Anthropic(api_key=current_app.config["ANTHROPIC_API_KEY"])
 
@@ -248,119 +174,6 @@ def _tool_use(response, name=None):
     return next(
         (b for b in response.content if b.type == "tool_use" and (name is None or b.name == name)), None
     )
-
-
-def _batch_has_cycle(tasks_input):
-    edges = {i: list(t.get("depends_on_batch_indices") or []) for i, t in enumerate(tasks_input)}
-    state = {}
-
-    def visit(i):
-        if state.get(i) == "visiting":
-            return True
-        if state.get(i) == "done":
-            return False
-        state[i] = "visiting"
-        if any(visit(j) for j in edges[i]):
-            return True
-        state[i] = "done"
-        return False
-
-    return any(visit(i) for i in edges)
-
-
-def _validate_proposals(project_id, tasks_input):
-    if not tasks_input:
-        raise ValueError("No researches were proposed")
-    for t in tasks_input:
-        if t.get("phase_key") == "7":
-            raise ValueError("Phase 7 (the options report) is drafted from its own button, not proposed")
-        if t.get("phase_key") not in DRAFTABLE_PHASES:
-            raise ValueError(f"Unknown phase: {t.get('phase_key')!r}")
-        if not (t.get("title") or "").strip():
-            raise ValueError("Every research needs a title")
-        if t.get("research_method") not in DRAFTABLE_METHODS:
-            raise ValueError(f"Unknown research method: {t.get('research_method')!r}")
-        for dep_id in t.get("depends_on_existing_ids") or []:
-            existing = research_work_items_repo.get(dep_id) if isinstance(dep_id, int) else None
-            if existing is None or existing["project_id"] != project_id:
-                raise ValueError(f"depends_on_existing_ids value {dep_id!r} is not a research in this project")
-        for dep_index in t.get("depends_on_batch_indices") or []:
-            if not isinstance(dep_index, int) or dep_index < 0 or dep_index >= len(tasks_input):
-                raise ValueError(
-                    f"depends_on_batch_indices value {dep_index!r} is out of range for a batch of {len(tasks_input)}"
-                )
-    if _batch_has_cycle(tasks_input):
-        raise ValueError("These researches depend on each other in a loop")
-
-
-def handle_propose_tasks(project_name, tool_input):
-    tasks_input = tool_input.get("tasks") or []
-    _validate_proposals(projects_repo.get_or_create_id(project_name), tasks_input)  # everything is checked before anything is created
-    new_ids = []
-    drafted = 0
-    for t in tasks_input:
-        created = create_drafted_card(
-            project_name, t["phase_key"], t["title"].strip(), research_method=t["research_method"],
-            focus=as_text_list(t.get("focus")) or None, rationale=t.get("rationale"),
-            framework_key=resolve_framework(t["phase_key"], t.get("framework_key")),
-            priority=t.get("priority") if t.get("priority") in ("low", "medium", "high") else None,
-        )
-        new_ids.append(created["card_id"])
-        drafted += 1 if created["drafted"] else 0
-    for i, t in enumerate(tasks_input):
-        for dep_id in t.get("depends_on_existing_ids") or []:
-            research_task_service.add_dependency(new_ids[i], dep_id)
-        for dep_index in t.get("depends_on_batch_indices") or []:
-            research_task_service.add_dependency(new_ids[i], new_ids[dep_index])
-    return {"created_task_ids": new_ids, "drafted_from_framework": drafted}
-
-
-def handle_no_action(project_name, tool_input):
-    return {"message": "No action taken."}
-
-
-DRAFTING_HANDLERS = {"propose_tasks": handle_propose_tasks, "no_action": handle_no_action}
-
-
-def draft_researches(project_name):
-    project_id = projects_repo.get_or_create_id(project_name)
-    response = _client().messages.create(
-        model=current_app.config["ANTHROPIC_MODEL"],
-        max_tokens=4000,
-        system=DRAFTING_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_context(project_name)}],
-        tools=DRAFTING_TOOLS,
-        tool_choice={"type": "any"},
-    )
-    block = _tool_use(response)
-    if block is None:
-        raise RuntimeError("The Supervisor did not return a decision.")
-
-    handler = DRAFTING_HANDLERS.get(block.name)
-    try:
-        if handler is None:
-            raise ValueError(f"The Supervisor chose a tool it is not allowed to use: {block.name}")
-        execution = {"success": True, "result": handler(project_name, block.input)}
-    except ValueError as exc:
-        execution = {"success": False, "error": str(exc)}
-
-    agent_decisions_repo.record(
-        project_id, decision_type=block.name, detail=json.dumps({"input": block.input, "execution": execution}),
-    )
-    return {"action": block.name, "input": block.input, "execution": execution}
-
-
-def create_followup_card(project_name, original, followup):
-    method = followup.get("research_method")
-    if method not in DRAFTABLE_METHODS:
-        method = original["research_method"] if original["research_method"] in DRAFTABLE_METHODS else "TARGETED_WEB"
-    created = create_drafted_card(
-        project_name, original["phase_key"], (followup.get("title") or f"Follow-up: {original['title']}").strip(),
-        research_method=method, focus=as_text_list(followup.get("focus")) or None,
-        rationale=followup.get("rationale") or f"Fills gaps found in \"{original['title']}\".",
-        framework_key=original["framework_key"], suggested_from_work_item_id=original["id"],
-    )
-    return created["card_id"]
 
 
 def _review_context(project_name, task):
@@ -383,28 +196,30 @@ def _review_context(project_name, task):
     )
 
 
-def _apply_review(project_name, card, tool_input):
-    outcome = tool_input.get("outcome")
-    if outcome not in REVIEW_OUTCOMES:
-        raise ValueError(f"Unknown review outcome: {outcome!r}")
-    research_task_service.set_review_scores(
-        card["id"],
-        completeness_score=tool_input.get("completeness_score"),
-        evidence_score=tool_input.get("evidence_score"),
-        identified_gaps=(
-            as_text_list(tool_input["identified_gaps"]) if tool_input.get("identified_gaps") is not None else None
-        ),
+DRAFTING_MENU = ("create_research_task", "no_action")
+REVIEW_MENU = ("evaluate_research_output",)
+
+
+def draft_researches(project_name):
+    project_id = projects_repo.get_or_create_id(project_name)
+    response = _client().messages.create(
+        model=current_app.config["ANTHROPIC_MODEL"],
+        max_tokens=4000,
+        system=DRAFTING_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": build_context(project_name)}],
+        tools=claude_tools(DRAFTING_MENU),
+        tool_choice={"type": "any"},
     )
-    followup_id = None
-    if outcome == "FOLLOW_UP_REQUIRED" and tool_input.get("followup"):
-        followup_id = create_followup_card(project_name, card, tool_input["followup"])
-    if outcome == "NEEDS_HUMAN" or (outcome == "COMPLETE" and card["human_review_required"]):
-        research_task_service.flag_for_human_review(card["id"])
-        new_status = "WAITING_FOR_HUMAN"
-    else:
-        new_status = outcome
-    research_task_service.transition_task(card["id"], new_status)
-    return {"outcome": outcome, "new_status": new_status, "followup_card_id": followup_id}
+    block = _tool_use(response)
+    if block is None:
+        raise RuntimeError("The Supervisor did not return a decision.")
+    result = run_tool(block.name, "supervisor", project_name, block.input, menu=DRAFTING_MENU)
+    execution = ({"success": True, "result": result.data} if result.ok
+                 else {"success": False, "error": result.error["message"]})
+    agent_decisions_repo.record(
+        project_id, decision_type=block.name, detail=json.dumps({"input": block.input, "execution": execution}),
+    )
+    return {"action": block.name, "input": block.input, "execution": execution}
 
 
 def review_card(project_name, card_id):
@@ -427,13 +242,17 @@ def review_card(project_name, card_id):
             max_tokens=2000,
             system=REVIEW_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _review_context(project_name, task.data)}],
-            tools=[REVIEW_TOOL],
-            tool_choice={"type": "tool", "name": "review_outcome"},
+            tools=claude_tools(REVIEW_MENU),
+            tool_choice={"type": "tool", "name": "evaluate_research_output"},
         )
-        block = _tool_use(response, "review_outcome")
+        block = _tool_use(response, "evaluate_research_output")
         if block is None:
             raise RuntimeError("The Supervisor did not return a review.")
-        result = _apply_review(project_name, research_work_items_repo.get(card_id), block.input)
+        inputs = dict(block.input)
+        inputs["task_id"] = card_id  # the system, not the model, decides which card is being reviewed
+        result = run_tool("evaluate_research_output", "supervisor", project_name, inputs, menu=REVIEW_MENU)
+        if not result.ok:
+            raise RuntimeError(result.error["message"])
     except Exception as exc:
         research_task_service.claim_transition(card_id, "REVIEWING", "RUNNING")
         agent_decisions_repo.record(
@@ -444,7 +263,7 @@ def review_card(project_name, card_id):
 
     agent_decisions_repo.record(
         project_id, decision_type="review_outcome",
-        detail=json.dumps({"input": block.input, "execution": {"success": True, "result": result}}),
+        detail=json.dumps({"input": block.input, "execution": {"success": True, "result": result.data}}),
         research_work_item_id=card_id,
     )
-    return {"reviewed": True, **result}
+    return {"reviewed": True, **result.data}

@@ -52,8 +52,8 @@ class FakeAnthropic:
 
     def create(self, **kwargs):
         names = {t["name"] for t in kwargs["tools"]}
-        if "propose_tasks" in names:
-            return SimpleNamespace(content=[Block("propose_tasks", {"reason": "Phases with no research yet", "tasks": [
+        if "create_research_task" in names:
+            return SimpleNamespace(content=[Block("create_research_task", {"reason": "Phases with no research yet", "tasks": [
                 {"phase_key": "1", "title": "Overview of online Psychology postgraduate programs", "research_method": "TARGETED_WEB",
                  "focus": ["Programs", "Providers"], "rationale": "Phase 1 has no findings yet."},
                 {"phase_key": "2", "title": "Who enrols in online Psychology postgraduate study", "research_method": "TARGETED_WEB",
@@ -67,7 +67,7 @@ class FakeAnthropic:
         if outcome == "FOLLOW_UP_REQUIRED":
             payload["followup"] = {"title": "Verify intake dates on official pages", "focus": ["Intakes"],
                                    "research_method": "TARGETED_WEB", "rationale": "Intake dates had no official source."}
-        return SimpleNamespace(content=[Block("review_outcome", payload)])
+        return SimpleNamespace(content=[Block("evaluate_research_output", payload)])
 
 
 started = {}

@@ -1,9 +1,9 @@
 # services/tools/__init__.py
 """The Supervisor's and the board's only way to act on the app: explicit, checked, logged tools.
 
-Each tool module registers its tools when imported; the `cards` and `state` imports below do that.
+Each tool module registers its tools when imported; the `cards`, `review` and `state` imports below do that.
 """
-from . import cards, state  # noqa: F401  (register the card and read tools)
+from . import cards, review, state  # noqa: F401  (register the card, review and read tools)
 from .registry import (  # noqa: F401
     CALLERS,
     HTTP_STATUS,

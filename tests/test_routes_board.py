@@ -125,7 +125,7 @@ class _Block:
 
 
 def test_draft_creates_cards_and_explains_itself(client, monkeypatch):
-    block = _Block("propose_tasks", {"reason": "Empty", "tasks": [
+    block = _Block("create_research_task", {"reason": "Empty", "tasks": [
         {"phase_key": "1", "title": "Landscape", "research_method": "TARGETED_WEB", "rationale": "Nothing yet"}]})
     fake = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: SimpleNamespace(content=[block])))
     monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: fake)

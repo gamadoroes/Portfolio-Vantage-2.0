@@ -131,7 +131,7 @@ def _card_ids(tool, parsed):
     return ids
 
 
-def run_tool(name, caller, project_name, inputs=None, parent_call_id=None):
+def run_tool(name, caller, project_name, inputs=None, parent_call_id=None, menu=None):
     started = time.monotonic()
     project_id = projects_repo.get_id(project_name) if project_name else None
     if project_id is None:
@@ -161,6 +161,8 @@ def run_tool(name, caller, project_name, inputs=None, parent_call_id=None):
         return finish(False, error=_error("internal", f"Something went wrong running {name}."),
                       work_item_id=work_item_id, log_message=detail[:LOG_STRING_LIMIT])
 
+    if menu is not None and name not in menu:  # checked first, so an invented tool name is logged as "not on this menu"
+        return finish(False, error=_error("not_allowed", f"{name} is not on this menu."))
     tool = _REGISTRY.get(name)
     if tool is None:
         return finish(False, error=_error("not_allowed", f"There is no tool called {name}."))

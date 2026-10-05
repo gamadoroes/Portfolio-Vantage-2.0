@@ -206,3 +206,9 @@ def test_register_rejects_an_id_field_that_is_not_on_the_input_model(temp_db):
             callers=frozenset({"user"}), id_fields=("nope",),
         ))
     assert tools.get_tool("test_bad_ids") is None
+
+
+def test_a_tool_not_on_the_menu_is_refused_and_logged(pid):
+    result = tools.run_tool("test_echo", "user", "P", {}, menu=("something_else",))
+    assert result.error["code"] == "not_allowed" and "menu" in result.error["message"]
+    assert _last_log(pid)["error_code"] == "not_allowed"

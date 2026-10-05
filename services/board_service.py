@@ -289,8 +289,12 @@ def needs_followup(project_name, card_id):
     _transition(card_id, "FOLLOW_UP_REQUIRED")
     gaps = _json_text_list(card["identified_gaps_json"])
     rationale = "You asked for a follow-up." + (f" Gaps found: {'; '.join(gaps)}" if gaps else "")
-    supervisor_service.create_followup_card(
-        project_name, card, {"title": f"Follow-up: {card['title']}", "focus": _focus(card), "rationale": rationale},
+    create_drafted_card(
+        project_name, card["phase_key"], f"Follow-up: {card['title']}",
+        research_method=(card["research_method"] if card["research_method"] in ("TARGETED_WEB", "FILE_ANALYSIS")
+                         else "TARGETED_WEB"),
+        focus=_focus(card) or None, rationale=rationale,
+        framework_key=card["framework_key"], suggested_from_work_item_id=card["id"],
     )
     _record(project_name, "user_needs_followup", card)
 
@@ -552,7 +556,7 @@ def _activity_item(decision, by_id):
         text = f"You started {count} {'research' if count == 1 else 'researches'}."
     elif dtype in _USER_TEXT:
         actor, text = "you", _USER_TEXT[dtype].format(title=title)
-    elif dtype == "propose_tasks":
+    elif dtype in ("propose_tasks", "create_research_task"):
         execution = detail.get("execution", {})
         if execution.get("success"):
             n = len(execution.get("result", {}).get("created_task_ids", []))

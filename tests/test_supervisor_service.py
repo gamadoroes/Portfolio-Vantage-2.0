@@ -259,7 +259,7 @@ def _install(monkeypatch, client):
 
 
 def _propose(*tasks, reason="Phases have no research yet"):
-    return _Block("propose_tasks", {"tasks": list(tasks), "reason": reason})
+    return _Block("create_research_task", {"tasks": list(tasks), "reason": reason})
 
 
 def _task(phase="1", title="Landscape overview", method="TARGETED_WEB", **extra):
@@ -269,19 +269,21 @@ def _task(phase="1", title="Landscape overview", method="TARGETED_WEB", **extra)
 
 # ---- drafting ----
 
-def test_drafting_offers_only_propose_and_no_action(temp_db, app_context, drafted, monkeypatch):
+def test_drafting_offers_only_create_and_no_action(temp_db, app_context, drafted, monkeypatch):
     projects_repo.get_or_create_id("P")
     client = _install(monkeypatch, _FakeClient([_Block("no_action", {"reason": "Nothing to add"})]))
     supervisor_service.draft_researches("P")
     call = client.calls[0]
-    assert {t["name"] for t in call["tools"]} == {"propose_tasks", "no_action"}
+    assert {t["name"] for t in call["tools"]} == {"create_research_task", "no_action"}
     assert call["tool_choice"] == {"type": "any"}
-    assert set(supervisor_service.DRAFTING_HANDLERS) == {"propose_tasks", "no_action"}
+    assert supervisor_service.DRAFTING_MENU == ("create_research_task", "no_action")
 
 
 def test_the_supervisor_has_no_way_to_approve_or_start_research():
     for removed in ("handle_mark_ready", "handle_dispatch_task", "handle_skip_task",
-                    "handle_trigger_synthesis", "run_supervisor_cycle", "TOOL_HANDLERS"):
+                    "handle_trigger_synthesis", "run_supervisor_cycle", "TOOL_HANDLERS",
+                    "handle_propose_tasks", "DRAFTING_HANDLERS", "create_followup_card", "_apply_review",
+                    "PROPOSE_TASKS_TOOL", "REVIEW_TOOL"):
         assert not hasattr(supervisor_service, removed)
 
 
@@ -300,7 +302,7 @@ def test_propose_creates_drafted_cards_awaiting_approval(temp_db, app_context, d
     assert items[0]["prompt_text"].startswith("ROLE: analyst.")
     assert items[0]["rationale"] == "Phase has no research"
     decision = agent_decisions_repo.list_for_project(pid)[0]
-    assert decision["decision_type"] == "propose_tasks"
+    assert decision["decision_type"] == "create_research_task"
     assert json.loads(decision["detail"])["execution"]["success"] is True
 
 
@@ -316,7 +318,7 @@ def test_invalid_proposals_create_nothing_and_are_recorded(temp_db, app_context,
     result = supervisor_service.draft_researches("P")
     assert result["execution"]["success"] is False
     assert research_work_items_repo.list_for_project(pid) == []
-    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "propose_tasks"
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "create_research_task"
 
 
 @pytest.mark.parametrize("make_bad_id", [
@@ -331,7 +333,7 @@ def test_bad_existing_dependencies_create_nothing_and_are_recorded(temp_db, app_
     result = supervisor_service.draft_researches("P")
     assert result["execution"]["success"] is False
     assert research_work_items_repo.list_for_project(pid) == []
-    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "propose_tasks"
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "create_research_task"
 
 
 def test_existing_dependencies_in_the_same_project_are_wired(temp_db, app_context, drafted, monkeypatch):
@@ -380,7 +382,7 @@ def _running_card(pid, output="Sources (1):\n- A - https://a.example\n\nReport b
 
 
 def _review(outcome, **extra):
-    return _Block("review_outcome", dict({"completeness_score": 0.8, "evidence_score": 0.7,
+    return _Block("evaluate_research_output", dict({"completeness_score": 0.8, "evidence_score": 0.7,
                                           "identified_gaps": ["No intake dates"], "outcome": outcome,
                                           "reason": "Because"}, **extra))
 
@@ -391,8 +393,8 @@ def test_review_is_forced_to_the_review_tool(temp_db, app_context, monkeypatch):
     client = _install(monkeypatch, _FakeClient([_review("COMPLETE")]))
     supervisor_service.review_card("P", card_id)
     call = client.calls[0]
-    assert [t["name"] for t in call["tools"]] == ["review_outcome"]
-    assert call["tool_choice"] == {"type": "tool", "name": "review_outcome"}
+    assert [t["name"] for t in call["tools"]] == ["evaluate_research_output"]
+    assert call["tool_choice"] == {"type": "tool", "name": "evaluate_research_output"}
     content = call["messages"][0]["content"]
     assert "Report body." in content
     # The briefing shows the card as it was before the review claimed it.
@@ -424,7 +426,7 @@ def test_follow_up_arrives_as_a_new_draft(temp_db, app_context, drafted, monkeyp
         "title": "Verify intake dates", "focus": ["Intakes"], "research_method": "TARGETED_WEB",
         "rationale": "Intake dates were missing"})]))
     result = supervisor_service.review_card("P", card_id)
-    follow = research_work_items_repo.get(result["followup_card_id"])
+    follow = research_work_items_repo.get(result["followup_task_id"])
     assert follow["status"] == "PROPOSED"
     assert follow["suggested_from_work_item_id"] == card_id
     assert follow["phase_key"] == "4"
@@ -505,7 +507,7 @@ def test_follow_up_focus_sent_as_a_string_is_stored_as_a_list(temp_db, app_conte
     _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", followup={
         "title": "Verify intakes", "focus": "Intakes", "research_method": "TARGETED_WEB"})]))
     result = supervisor_service.review_card("P", card_id)
-    follow = research_work_items_repo.get(result["followup_card_id"])
+    follow = research_work_items_repo.get(result["followup_task_id"])
     assert json.loads(follow["entities_json"]) == ["Intakes"]
 
 
@@ -518,3 +520,27 @@ def test_helpers_and_limits_moved_without_changing_values():
     assert supervisor_service.as_text_list is text_utils.as_text_list
     assert text_utils.clip_text("abcdef", 3) == "abc...[truncated]"
     assert text_utils.clip_text("abc", 3) == "abc"
+
+
+def test_an_off_menu_tool_from_the_model_runs_nothing(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card = research_task_service.create_task(pid, "4", "Fees", research_method="TARGETED_WEB", prompt_text="x" * 50)
+    research_work_items_repo.update_fields(card, status="READY")
+    _install(monkeypatch, _FakeClient([_Block("launch_deep_research", {"task_ids": [card]})]))
+    result = supervisor_service.draft_researches("P")
+    assert result["execution"]["success"] is False
+    assert research_work_items_repo.get(card)["status"] == "READY"
+    from db.repositories import tool_calls_repo
+    log = tool_calls_repo.list_for_project(pid)[0]
+    assert (log["tool"], log["caller"], log["error_code"]) == ("launch_deep_research", "supervisor", "not_allowed")
+
+
+def test_the_reviewed_card_is_chosen_by_the_system_not_the_model(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card = _running_card(pid)
+    other = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_Block("evaluate_research_output", {
+        "task_id": other, "completeness_score": 0.8, "evidence_score": 0.7, "outcome": "COMPLETE", "reason": "x"})]))
+    supervisor_service.review_card("P", card)
+    assert research_work_items_repo.get(card)["status"] == "COMPLETE"
+    assert research_work_items_repo.get(other)["status"] == "RUNNING"
