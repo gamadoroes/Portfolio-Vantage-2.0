@@ -1,5 +1,6 @@
 # services/supervisor_service.py
 import json
+import re
 
 import anthropic
 from flask import current_app
@@ -230,22 +231,68 @@ def draft_researches(project_name):
     return {"action": block.name, "input": block.input, "execution": execution}
 
 
-def _clean_review_input(raw):
-    """The model's review, trimmed to the tool's limits so a long answer cannot fail a paid review."""
+# The live model sometimes garbles a nested answer: text arrives wrapped in a stray <parameter name="..."> tag,
+# and the follow-up's own fields spill out to the top level of the review.
+_LEAKED_PARAMETER = re.compile(r'<parameter name="([^"]+)">(.*?)(?=</parameter>|<parameter name=|\Z)', re.S)
+_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_FOLLOWUP_FIELDS = ("title", "focus", "research_method", "rationale")
+
+
+def _leaked_value(text):
+    text = text.strip()
+    try:
+        value = json.loads(text)
+    except ValueError:
+        if text.startswith("["):  # a list cut short: keep the complete quoted items
+            return [json.loads(f'"{q}"') for q in _QUOTED.findall(text)]
+        return text
+    return value if isinstance(value, (list, dict)) else text
+
+
+def _leaked_parameters(text):
+    """The <parameter name="..."> pieces inside a garbled string, by name ({} when there are none)."""
+    return {name: _leaked_value(value) for name, value in _LEAKED_PARAMETER.findall(text)}
+
+
+def _unwrap(value, name):
+    if not isinstance(value, str) or "<parameter name=" not in value:
+        return value
+    found = _leaked_parameters(value)
+    if name in found:
+        return found[name]
+    return next(iter(found.values())) if len(found) == 1 else value
+
+
+def _clean_review_input(raw, card_title):
+    """The model's review, recovered from garbling and trimmed to the tool's limits, so an untidy answer cannot
+    fail a paid review. A review asking for a follow-up always gets one; without a usable title it is named after
+    the reviewed card and looks at the gaps."""
     cleaned = dict(raw)
-    cleaned["identified_gaps"] = [g[:review_tool.GAP_CHARS]
-                                  for g in as_text_list(cleaned.get("identified_gaps"))][:review_tool.GAP_ITEMS]
-    cleaned["reason"] = str(cleaned.get("reason") or "").strip()[:review_tool.REASON_CHARS]
+    cleaned["identified_gaps"] = [g[:review_tool.GAP_CHARS] for g in as_text_list(
+        _unwrap(cleaned.get("identified_gaps"), "identified_gaps"))][:review_tool.GAP_ITEMS]
+    cleaned["reason"] = str(_unwrap(cleaned.get("reason"), "reason") or "").strip()[:review_tool.REASON_CHARS]
+
     followup = cleaned.pop("followup", None)
-    title = str(followup.get("title") or "").strip()[:review_tool.FOLLOWUP_TITLE_CHARS] if isinstance(followup, dict) else ""
-    if title:  # without a usable title there is no follow-up; the review still goes ahead
-        method = followup.get("research_method")
+    if isinstance(followup, str):
+        followup = _leaked_parameters(followup)
+    followup = dict(followup) if isinstance(followup, dict) else {}
+    for field in _FOLLOWUP_FIELDS:  # fields that spilled out of the follow-up object
+        stray = cleaned.pop(field, None)
+        if followup.get(field) in (None, "", []) and stray not in (None, "", []):
+            followup[field] = stray
+    followup = {field: _unwrap(followup.get(field), field) for field in _FOLLOWUP_FIELDS}
+
+    title = str(followup["title"] or "").strip()[:review_tool.FOLLOWUP_TITLE_CHARS]
+    if not title and cleaned.get("outcome") == "FOLLOW_UP_REQUIRED":
+        title = f"Follow-up: {card_title}"[:review_tool.FOLLOWUP_TITLE_CHARS]
+    if title:
+        focus = as_text_list(followup["focus"]) or cleaned["identified_gaps"]
+        method = followup["research_method"]
         cleaned["followup"] = {
             "title": title,
-            "focus": [f[:review_tool.FOLLOWUP_FOCUS_CHARS]
-                      for f in as_text_list(followup.get("focus"))][:review_tool.FOLLOWUP_FOCUS_ITEMS],
+            "focus": [f[:review_tool.FOLLOWUP_FOCUS_CHARS] for f in focus][:review_tool.FOLLOWUP_FOCUS_ITEMS],
             "research_method": method if method in review_tool.FOLLOWUP_METHODS else None,
-            "rationale": str(followup.get("rationale") or "").strip()[:review_tool.FOLLOWUP_RATIONALE_CHARS],
+            "rationale": str(followup["rationale"] or "").strip()[:review_tool.FOLLOWUP_RATIONALE_CHARS],
         }
     return cleaned
 
@@ -276,7 +323,7 @@ def review_card(project_name, card_id):
         block = _tool_use(response, "evaluate_research_output")
         if block is None:
             raise RuntimeError("The Supervisor did not return a review.")
-        inputs = _clean_review_input(block.input)
+        inputs = _clean_review_input(block.input, card["title"])
         inputs["task_id"] = card_id  # the system, not the model, decides which card is being reviewed
         result = run_tool("evaluate_research_output", "supervisor", project_name, inputs, menu=REVIEW_MENU)
         if not result.ok:

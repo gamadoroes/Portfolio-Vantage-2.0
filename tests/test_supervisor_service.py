@@ -466,14 +466,63 @@ def test_a_long_gap_and_a_long_reason_do_not_fail_a_human_review(temp_db, app_co
     assert [len(g) for g in json.loads(row["identified_gaps_json"])] == [500]
 
 
-@pytest.mark.parametrize("followup", ["not a dict", {"title": "   ", "focus": ["x"]}, {"focus": ["x"]}, ["a"]])
-def test_an_unusable_followup_is_dropped_and_the_review_still_succeeds(temp_db, app_context, monkeypatch, followup):
+@pytest.mark.parametrize("followup", [None, "not a dict", {"title": "   ", "focus": ["x"]}, {"focus": []}, ["a"]])
+def test_an_unreadable_followup_still_gives_a_follow_up_card(temp_db, app_context, drafted, monkeypatch, followup):
     pid = projects_repo.get_or_create_id("P")
     card_id = _running_card(pid)
-    _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", followup=followup)]))
+    extra = {} if followup is None else {"followup": followup}
+    _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", **extra)]))
     result = supervisor_service.review_card("P", card_id)
-    assert result["reviewed"] is True and result["followup_task_id"] is None
+    assert result["reviewed"] is True
     assert research_work_items_repo.get(card_id)["status"] == "FOLLOW_UP_REQUIRED"
+    follow = research_work_items_repo.get(result["followup_task_id"])
+    assert follow["title"] == "Follow-up: Fees"
+    assert follow["status"] == "PROPOSED" and follow["suggested_from_work_item_id"] == card_id
+    assert json.loads(follow["entities_json"]) == (["x"] if isinstance(followup, dict) and followup.get("focus")
+                                                   else ["No intake dates"])
+
+
+@pytest.mark.parametrize("outcome", ["COMPLETE", "NEEDS_HUMAN", "FAILED"])
+def test_no_follow_up_card_unless_the_review_asks_for_one(temp_db, app_context, drafted, monkeypatch, outcome):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review(outcome, followup="not a dict")]))
+    assert supervisor_service.review_card("P", card_id)["followup_task_id"] is None
+    assert [c["id"] for c in research_work_items_repo.list_for_project(pid)] == [card_id]
+
+
+def test_a_jumbled_review_answer_is_recovered(temp_db, app_context, drafted, monkeypatch):
+    # The shape the live model sent on 2026-10-05: the follow-up's fields leaked out of their object and the
+    # gaps list arrived wrapped in a stray parameter tag.
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    gaps = '<parameter name="identified_gaps">["Pricing missing for Deakin", "No curriculum mapping"]</parameter>'
+    _install(monkeypatch, _FakeClient([_review(
+        "FOLLOW_UP_REQUIRED", identified_gaps=gaps,
+        followup='\n<parameter name="title">Phase 1B: Complete pricing',
+        rationale="Pricing and curriculum were left incomplete.", research_method="TARGETED_WEB",
+        focus=["Fee schedules for Deakin", "Curriculum structure"])]))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True
+    stored = json.loads(research_work_items_repo.get(card_id)["identified_gaps_json"])
+    assert stored == ["Pricing missing for Deakin", "No curriculum mapping"]
+    follow = research_work_items_repo.get(result["followup_task_id"])
+    assert follow["title"] == "Phase 1B: Complete pricing"
+    assert json.loads(follow["entities_json"]) == ["Fee schedules for Deakin", "Curriculum structure"]
+    assert follow["rationale"] == "Pricing and curriculum were left incomplete."
+
+
+def test_a_followup_object_with_several_leaked_parameters_is_recovered(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review(
+        "FOLLOW_UP_REQUIRED",
+        followup='<parameter name="title">Verify intakes</parameter>\n<parameter name="focus">["Intakes", "Census dates"]'
+                 '</parameter>\n<parameter name="research_method">FILE_ANALYSIS</parameter>')]))
+    follow = research_work_items_repo.get(supervisor_service.review_card("P", card_id)["followup_task_id"])
+    assert follow["title"] == "Verify intakes"
+    assert json.loads(follow["entities_json"]) == ["Intakes", "Census dates"]
+    assert follow["research_method"] == "FILE_ANALYSIS"
 
 
 def test_complete_on_a_card_already_flagged_for_a_person_waits_for_them(temp_db, app_context, monkeypatch):

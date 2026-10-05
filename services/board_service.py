@@ -530,7 +530,12 @@ def _activity_item(decision, by_id):
         text = f"Supervisor had nothing new to propose: {reason}" if reason else "Supervisor had nothing new to propose."
     elif dtype == "review_outcome":
         outcome = detail.get("input", {}).get("outcome")
-        text = f'Supervisor reviewed "{title}": {_OUTCOME_TEXT.get(outcome, outcome)}.'
+        result = detail.get("execution", {}).get("result") or {}
+        if outcome == "FOLLOW_UP_REQUIRED" and "followup_task_id" in result and result["followup_task_id"] is None:
+            text = (f'Supervisor reviewed "{title}": finished, but it needs a follow-up that could not be drafted. '
+                    "Add one with + Add research.")
+        else:
+            text = f'Supervisor reviewed "{title}": {_OUTCOME_TEXT.get(outcome, outcome)}.'
     elif dtype == "off_menu_tool":
         tool = str(detail.get("tool", "a tool"))[:100]
         text = f"Supervisor tried to use {tool}, which it isn't allowed to. Nothing ran."

@@ -479,6 +479,20 @@ def test_activity_says_plainly_when_the_supervisor_tried_a_tool_it_may_not_use(p
     assert len(text) < 200
 
 
+@pytest.mark.parametrize("result,expected", [
+    ({"followup_task_id": 99}, 'Supervisor reviewed "Fees": finished, with a follow-up suggested for your approval.'),
+    ({"followup_task_id": None}, 'Supervisor reviewed "Fees": finished, but it needs a follow-up that could not be '
+                                 'drafted. Add one with + Add research.'),
+    ({}, 'Supervisor reviewed "Fees": finished, with a follow-up suggested for your approval.'),  # older rows
+])
+def test_activity_only_promises_a_follow_up_that_exists(pid, result, expected):
+    card_id = _card(pid)
+    agent_decisions_repo.record(pid, "review_outcome", json.dumps({
+        "input": {"outcome": "FOLLOW_UP_REQUIRED"}, "execution": {"success": True, "result": result}}),
+        research_work_item_id=card_id)
+    assert board_service.get_board_state("P")["activity"][0]["text"] == expected
+
+
 def test_activity_reads_in_plain_words(pid):
     card_id = _card(pid)
     board_service.ACTIONS["approve"]("P", card_id)
