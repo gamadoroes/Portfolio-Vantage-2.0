@@ -18,6 +18,7 @@ from .review_limits import (
 )
 from .text_utils import as_text_list, clip_text
 from .tools import claude_tools, run_tool
+from .tools import research_facts as facts_tool
 from .tools import review as review_tool
 
 # Each task line also carries what the card is about, kept short.
@@ -200,6 +201,25 @@ def _review_context(project_name, task):
 
 DRAFTING_MENU = ("create_research_task", "no_action")
 REVIEW_MENU = ("evaluate_research_output",)
+EXTRACT_MENU = ("record_research_facts",)
+EXTRACT_MAX_TOKENS = 6000  # room for up to 25 facts and 3 conclusions
+# The extraction reads far more of the report than the review may (the review's view is set in review_limits.py).
+MAX_EXTRACT_REPORT_CHARS = 60000
+
+FACTS_INSTRUCTIONS = (
+    "Record the report's key facts in facts (at most 25): one short, checkable claim each, with the address "
+    "(source_url) and title (source_title) of the page it came from as listed in the report's sources, a short "
+    "quote if the report gives one, and the date or year the claim applies to (as_of). Leave the source empty if "
+    "the report does not say where a claim came from; never invent one. Then write up to 3 conclusions for this "
+    "phase in conclusions, each citing the facts it rests on by their positions in your facts list "
+    "(fact_numbers, counting from 1)."
+)
+
+EXTRACT_SYSTEM_PROMPT = (
+    "You are the research supervisor taking facts from ONE finished research report for an Australian "
+    "higher-education competitive-intelligence project. Do not score or judge the research. Use only what the "
+    "report says. " + FACTS_INSTRUCTIONS
+)
 
 
 def draft_researches(project_name):
@@ -297,6 +317,87 @@ def _clean_review_input(raw, card_title):
     return cleaned
 
 
+FACT_FIELDS = ("claim", "quote", "source_url", "source_title", "publisher", "published_date", "as_of")
+CONCLUSION_FIELDS = ("text", "fact_numbers")
+_EMPTY = (None, "", [])
+_DECODER = json.JSONDecoder()
+
+
+def _complete_objects(text):
+    """The complete JSON objects in a list that was cut short (or wrapped in stray text)."""
+    found, start = [], text.find("{")
+    while start != -1:
+        try:
+            value, end = _DECODER.raw_decode(text, start)
+        except ValueError:
+            break  # the list was cut short inside this object
+        if isinstance(value, dict):
+            found.append(value)
+        start = text.find("{", end)
+    return found
+
+
+def _lift_swallowed(cleaned, names):
+    """A garbled string can swallow the fields that came after it; lift those back to the top level."""
+    for value in list(cleaned.values()):
+        if isinstance(value, str) and "<parameter name=" in value:
+            pieces = dict(_LEAKED_PARAMETER.findall(value))
+            for name in names:
+                if name in pieces and cleaned.get(name) in _EMPTY:
+                    cleaned[name] = pieces[name]
+
+
+def _object_list(cleaned, name, fields):
+    """A list of objects from a field the model may have garbled: a JSON string (possibly cut short or wrapped in
+    a stray <parameter> tag), one object, or one object whose fields arrived as tags and spilled to the top level."""
+    value = cleaned.get(name)
+    if isinstance(value, str):
+        pieces = dict(_LEAKED_PARAMETER.findall(value))
+        if fields[0] in pieces:  # one object, its fields as stray tags; the rest spilled to the top level
+            item = {key: _leaked_value(text) for key, text in pieces.items() if key in fields}
+            for key in fields:
+                stray = cleaned.pop(key, None)
+                if item.get(key) in _EMPTY and stray not in _EMPTY:
+                    item[key] = stray
+            return [item]
+        head = value.split('<parameter name="', 1)[0].replace("</parameter>", "").strip()
+        text = pieces.get(name) or head or (next(iter(pieces.values())) if len(pieces) == 1 else "")
+        try:
+            value = json.loads(text)
+        except ValueError:
+            value = _complete_objects(text)
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _clean_facts(raw):
+    """The facts and conclusions in the extraction answer, recovered from garbling and cut to the batch limits. Items
+    that are not objects are dropped; record_research_facts then checks every remaining item on its own."""
+    cleaned = dict(raw) if isinstance(raw, dict) else {}
+    _lift_swallowed(cleaned, ("facts", "conclusions"))
+    return {
+        "facts": _object_list(cleaned, "facts", FACT_FIELDS)[:facts_tool.MAX_FACTS],
+        "conclusions": _object_list(cleaned, "conclusions", CONCLUSION_FIELDS)[:facts_tool.MAX_CONCLUSIONS],
+    }
+
+
+def _facts_summary(data):
+    """Counts from record_research_facts' result, or None when no facts were recorded."""
+    if not isinstance(data, dict) or "fact_ids" not in data:
+        return None
+    return {"facts": len(data["fact_ids"]), "conclusions": len(data["conclusion_ids"]),
+            "skipped": sum(1 for s in data["skipped"] if not s.get("saved"))}
+
+
+def _record_facts_saved(project_id, card_id, title, summary):
+    if summary and any(summary.values()):
+        agent_decisions_repo.record(project_id, decision_type="facts_recorded",
+                                    detail=json.dumps({"title": title, **summary}), research_work_item_id=card_id)
+
+
 def review_card(project_name, card_id):
     project_id = projects_repo.get_or_create_id(project_name)
     card = research_work_items_repo.get(card_id)
@@ -341,4 +442,55 @@ def review_card(project_name, card_id):
         detail=json.dumps({"input": block.input, "execution": {"success": True, "result": result.data}}),
         research_work_item_id=card_id,
     )
-    return {"reviewed": True, **result.data}
+    # Facts come from a second call that reads much more of the report than the review may (review_limits.py).
+    # Whatever happens there, the review above stands.
+    return {"reviewed": True, **result.data,
+            "extraction": _extract_after_review(project_name, card, result.data["outcome"])}
+
+
+def _extract_context(card, run):
+    phase_title = PHASE_DEFINITIONS.get(card["phase_key"], {}).get("title", card["phase_key"])
+    report = _clip_run_output(run["output_text"] or "", MAX_EXTRACT_REPORT_CHARS)
+    return (f"# RESEARCH\n\nPhase {card['phase_key']}: {phase_title}\nTitle: {card['title']}\n\n"
+            f"# REPORT\n\n{report}")
+
+
+def extract_facts(project_name, card_id, parent_call_id=None):
+    """One paid Claude call that only extracts facts (after a review, or from the Extract facts button).
+    extract_research_facts has already claimed the run; this raises on any failure so the tool can release it."""
+    card = research_work_items_repo.get(card_id)
+    run = research_runs_repo.find_latest_for_work_item(card_id)
+    response = _client().messages.create(
+        model=current_app.config["ANTHROPIC_MODEL"],
+        max_tokens=EXTRACT_MAX_TOKENS,
+        system=EXTRACT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _extract_context(card, run)}],
+        tools=claude_tools(EXTRACT_MENU),
+        tool_choice={"type": "tool", "name": "record_research_facts"},
+    )
+    block = _tool_use(response, "record_research_facts")
+    if block is None:
+        raise RuntimeError("The Supervisor did not return any facts.")
+    inputs = {**_clean_facts(block.input), "task_id": card_id}  # the system, not the model, picks the research
+    result = run_tool("record_research_facts", "supervisor", project_name, inputs,
+                      parent_call_id=parent_call_id, menu=EXTRACT_MENU)
+    if not result.ok:
+        raise RuntimeError(result.error["message"])
+    _record_facts_saved(card["project_id"], card_id, card["title"], _facts_summary(result.data))
+    return result.data
+
+
+def _extract_after_review(project_name, card, outcome):
+    """One extraction call on a card that was just reviewed. It never affects the review: a failure is logged (by
+    run_tool, and printed here) and only reported in the returned summary."""
+    if outcome == "FAILED" or card["research_method"] == "SYNTHESIS":
+        return None
+    try:
+        result = run_tool("extract_research_facts", "system", project_name, {"task_id": card["id"]})
+        if result.ok:
+            return {"ok": True, **_facts_summary(result.data)}
+        message = result.error["message"]
+    except Exception as exc:  # run_tool does not raise; this only guarantees the review is never affected
+        message = f"{type(exc).__name__}: {exc}"
+    print(f"[supervisor] facts were not extracted from research {card['id']}: {message}")
+    return {"ok": False, "error": message}

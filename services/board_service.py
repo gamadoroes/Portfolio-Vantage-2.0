@@ -101,6 +101,17 @@ def _focus(card):
     return _json_text_list(card["entities_json"])
 
 
+def _count(n, one, many):
+    return f"{n} {one if n == 1 else many}"
+
+
+def _as_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 # ---- card actions ----
 
 def _user_tool(project_name, name, inputs):
@@ -496,6 +507,7 @@ _USER_TEXT = {
     "user_reject_conclusion": "You rejected a conclusion.",
     "user_restore_conclusion": "You restored a conclusion.",
     "user_mark_failed": 'You marked "{title}" as failed.',
+    "user_extract_facts": 'You extracted facts from "{title}".',
     "user_draft_options": "You drafted the options report.",
     "user_objective": "You updated the objective.",
 }
@@ -545,6 +557,14 @@ def _activity_item(decision, by_id):
         text = f"Supervisor tried to use {tool}, which it isn't allowed to. Nothing ran."
     elif dtype == "review_error":
         text = f'The review of "{title}" didn\'t complete. It will be retried.'
+    elif dtype == "facts_recorded":
+        facts, conclusions, skipped = (_as_int(detail.get(k)) for k in ("facts", "conclusions", "skipped"))
+        extra = f" ({skipped} skipped)" if skipped else ""
+        if facts or conclusions:
+            text = (f"Supervisor saved {_count(facts, 'fact', 'facts')} and "
+                    f"{_count(conclusions, 'conclusion', 'conclusions')} from \"{title}\"{extra}.")
+        else:
+            text = f'Supervisor found no facts it could save in "{title}"{extra}.'
     else:
         text = f"Supervisor: {dtype.replace('_', ' ')}"
     return {"at": decision["created_at"], "actor": actor, "text": text}

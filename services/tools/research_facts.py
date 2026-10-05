@@ -9,6 +9,7 @@ from pydantic import BeforeValidator, Field, model_validator
 
 from db.repositories import research_runs_repo, research_work_items_repo
 
+from .activity import record_user_action
 from .evidence import (
     AS_OF_CHARS,
     CLAIM_CHARS,
@@ -181,10 +182,58 @@ def record_research_facts(ctx, inputs):
     return {"fact_ids": fact_ids, "conclusion_ids": conclusion_ids, "skipped": skipped}
 
 
+EXTRACTABLE_STATUSES = ("COMPLETE", "FOLLOW_UP_REQUIRED", "WAITING_FOR_HUMAN")
+NOT_EXTRACTABLE = "Facts can only be taken from a finished research that has a report."
+ALREADY_EXTRACTED = "Facts are already being taken from this report, or have been."
+
+
+def can_extract_facts(card, run):
+    """Whether the "Extract facts" button shows for this card and its latest run."""
+    return (card["status"] in EXTRACTABLE_STATUSES and card["research_method"] != "SYNTHESIS"
+            and run is not None and bool(run["output_text"]) and not run["facts_extracted_at"])
+
+
+class ExtractInput(ToolInput):
+    task_id: CardId
+
+
+def extract_research_facts(ctx, inputs):
+    from .. import supervisor_service  # imported here: supervisor_service imports this package
+
+    card = research_work_items_repo.get(inputs.task_id)
+    run = research_runs_repo.find_latest_for_work_item(inputs.task_id)
+    if card["research_method"] == "SYNTHESIS":
+        raise ToolError("conflict", OPTIONS_REPORT)
+    if card["status"] not in EXTRACTABLE_STATUSES or run is None or not run["output_text"]:
+        raise ToolError("conflict", NOT_EXTRACTABLE)
+    if not research_runs_repo.claim_facts_extraction(run["id"]):  # one paid call per report, whoever asks
+        raise ToolError("conflict", ALREADY_EXTRACTED)
+    try:
+        data = supervisor_service.extract_facts(ctx.project_name, inputs.task_id, parent_call_id=ctx.call_id)
+    except Exception:
+        research_runs_repo.release_facts_extraction(run["id"])  # nothing was taken: the person can try again
+        raise
+    if not data["fact_ids"]:
+        research_runs_repo.release_facts_extraction(run["id"])
+    if ctx.caller == "user" and data["fact_ids"]:  # no line for the automatic step, or when nothing was saved
+        record_user_action(ctx, "user_extract_facts", inputs.task_id,
+                           facts=len(data["fact_ids"]), conclusions=len(data["conclusion_ids"]))
+    return data
+
+
 register(Tool(
     name="record_research_facts",
     description="Save the key facts (with the pages they came from) and up to 3 conclusions from one finished "
                 "research report. Each item is checked on its own; anything unusable is skipped with a reason.",
     input_model=RecordFactsInput, handler=record_research_facts,
     callers=frozenset({"supervisor"}), id_fields=("task_id",),
+))
+
+
+register(Tool(
+    name="extract_research_facts",
+    description="Take the facts and conclusions from a finished research's report with one paid Claude call. "
+                "Started by the system right after a review, or by the person's Extract facts button.",
+    input_model=ExtractInput, handler=extract_research_facts,
+    callers=frozenset({"user", "system"}), id_fields=("task_id",),
 ))

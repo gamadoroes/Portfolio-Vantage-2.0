@@ -1,10 +1,25 @@
 import json
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 
-from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
-from services import insights_service, llm_service, project_service, research_task_service, supervisor_service
+from db.repositories import (
+    agent_decisions_repo,
+    evidence_repo,
+    projects_repo,
+    research_runs_repo,
+    research_work_items_repo,
+)
+from services import (
+    board_service,
+    insights_service,
+    llm_service,
+    project_service,
+    research_task_service,
+    supervisor_service,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -644,3 +659,155 @@ def test_the_reviewed_card_is_chosen_by_the_system_not_the_model(temp_db, app_co
     supervisor_service.review_card("P", card)
     assert research_work_items_repo.get(card)["status"] == "COMPLETE"
     assert research_work_items_repo.get(other)["status"] == "RUNNING"
+
+
+# ---- automatic fact extraction after the review ----
+
+class _ScriptedClient:
+    """Answers each Claude call with the next item, in order: the review first, then the extraction."""
+
+    def __init__(self, *answers):
+        self.calls, self._answers = [], list(answers)
+        self.messages = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        answer = self._answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return SimpleNamespace(content=[answer])
+
+
+EXTRACTED = [{"claim": "Deakin charges $3,000 per unit", "source_url": "https://a.example", "source_title": "A",
+              "as_of": "2026"},
+             {"claim": "Monash runs three intakes"}]
+
+
+def _facts_answer(facts=EXTRACTED, conclusions=({"text": "Fees and intakes differ", "fact_numbers": [1, 2]},)):
+    return _Block("record_research_facts", {"facts": facts, "conclusions": list(conclusions)})
+
+
+def test_a_review_is_followed_by_one_extraction_that_reads_the_whole_report(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid, output="Sources (1):\n- A - https://a.example\n\n" + "y" * 20000 + " LATE DETAIL")
+    client = _install(monkeypatch, _ScriptedClient(_review("COMPLETE"), _facts_answer()))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True and result["new_status"] == "COMPLETE"
+    assert result["extraction"] == {"ok": True, "facts": 2, "conclusions": 1, "skipped": 0}
+    review_call, extract_call = client.calls
+    # The review call is exactly as before.
+    assert [t["name"] for t in review_call["tools"]] == ["evaluate_research_output"]
+    assert review_call["max_tokens"] == 2000
+    assert "facts" not in review_call["tools"][0]["input_schema"]["properties"]
+    assert "LATE DETAIL" not in review_call["messages"][0]["content"]
+    # The extraction call reads the rest of the report.
+    assert [t["name"] for t in extract_call["tools"]] == ["record_research_facts"]
+    assert extract_call["tool_choice"] == {"type": "tool", "name": "record_research_facts"}
+    assert extract_call["max_tokens"] == 6000
+    assert "LATE DETAIL" in extract_call["messages"][0]["content"]
+    assert len(evidence_repo.list_facts(pid)) == 2
+    assert research_runs_repo.get(f"run_{card_id}")["facts_extracted_at"]
+    # No "You extracted facts" line for the automatic step.
+    assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)] == ["facts_recorded", "review_outcome"]
+    texts = [a["text"] for a in board_service.get_board_state("P")["activity"]]
+    assert texts[0] == 'Supervisor saved 2 facts and 1 conclusion from "Fees".'
+
+
+def test_a_failed_review_triggers_no_extraction(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    client = _install(monkeypatch, _ScriptedClient(_review("FAILED")))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True and result["extraction"] is None and len(client.calls) == 1
+    assert research_runs_repo.get(f"run_{card_id}")["facts_extracted_at"] is None
+
+
+def test_the_options_report_is_never_mined(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    research_work_items_repo.update_fields(card_id, research_method="SYNTHESIS")
+    client = _install(monkeypatch, _ScriptedClient(_review("COMPLETE")))
+    assert supervisor_service.review_card("P", card_id)["extraction"] is None and len(client.calls) == 1
+
+
+@pytest.mark.parametrize("second_answer,ok", [
+    (anthropic.APIConnectionError(request=httpx.Request("POST", "https://example.invalid")), False),
+    (SimpleNamespace(type="text", text="Here are some facts."), False),
+    (_Block("record_research_facts", {"facts": [{"claim": ""}, "not a fact"]}), True),
+])
+def test_an_extraction_that_fails_or_finds_nothing_leaves_the_review_exactly_as_it_was(
+        temp_db, app_context, drafted, monkeypatch, second_answer, ok):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _ScriptedClient(_review("FOLLOW_UP_REQUIRED", followup={"title": "Verify intakes"}), second_answer))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True and result["extraction"]["ok"] is ok
+    row = research_work_items_repo.get(card_id)
+    assert (row["status"], row["completeness_score"], row["evidence_score"]) == ("FOLLOW_UP_REQUIRED", 0.8, 0.7)
+    assert json.loads(row["identified_gaps_json"]) == ["No intake dates"]
+    assert research_work_items_repo.get(result["followup_task_id"])["title"] == "Verify intakes"
+    assert evidence_repo.list_facts(pid) == []
+    assert research_runs_repo.get(f"run_{card_id}")["facts_extracted_at"] is None  # "Extract facts" stays available
+
+
+def test_a_review_of_a_report_already_being_mined_makes_no_second_call(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    research_runs_repo.claim_facts_extraction(f"run_{card_id}")  # a click on "Extract facts" got there first
+    client = _install(monkeypatch, _ScriptedClient(_review("COMPLETE")))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True and research_work_items_repo.get(card_id)["status"] == "COMPLETE"
+    assert len(client.calls) == 1 and result["extraction"]["ok"] is False
+
+
+@pytest.mark.parametrize("facts_field,claims", [
+    ('<parameter name="facts">[{"claim": "Deakin charges $3,000 per unit"}, {"claim": "cut sh',
+     ["Deakin charges $3,000 per unit"]),
+    ('[{"claim": "Deakin charges $3,000 per unit"}]', ["Deakin charges $3,000 per unit"]),
+    ({"claim": "Deakin charges $3,000 per unit"}, ["Deakin charges $3,000 per unit"]),
+    ("\n- A bulleted fact\n- Another", []),
+])
+def test_jumbled_extraction_answers_from_the_live_model_are_recovered(temp_db, app_context, monkeypatch,
+                                                                     facts_field, claims):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _ScriptedClient(_review("COMPLETE"), _Block("record_research_facts", {"facts": facts_field})))
+    assert supervisor_service.review_card("P", card_id)["reviewed"] is True
+    assert research_work_items_repo.get(card_id)["status"] == "COMPLETE"
+    assert [f["claim"] for f in evidence_repo.list_facts(pid)] == claims
+
+
+@pytest.mark.parametrize("raw,claims", [
+    ({"facts": [{"claim": "A"}, "not an object", 3]}, ["A"]),
+    ({"facts": {"claim": "A"}}, ["A"]),
+    ({"facts": '[{"claim": "A"}, {"claim": "B"}]'}, ["A", "B"]),
+    ({"facts": '<parameter name="facts">[{"claim": "A"}, {"claim": "B", "source_url": "https://b.example"}, '
+               '{"claim": "cut sh'}, ["A", "B"]),
+    ({"facts": "\n- A bulleted fact\n- Another"}, []),
+    ({"facts": None}, []),
+    ({}, []),
+    ("not even a dict", []),
+])
+def test_clean_facts_recovers_what_it_can(raw, claims):
+    assert [f["claim"] for f in supervisor_service._clean_facts(raw)["facts"]] == claims
+
+
+def test_clean_facts_rebuilds_one_fact_whose_fields_spilled_out():
+    raw = {"facts": '\n<parameter name="claim">Deakin charges $3,000 per unit.',
+           "source_url": "https://deakin.edu.au/fees", "as_of": "2026"}
+    assert supervisor_service._clean_facts(raw)["facts"] == [
+        {"claim": "Deakin charges $3,000 per unit.", "source_url": "https://deakin.edu.au/fees", "as_of": "2026"}]
+
+
+def test_clean_facts_lifts_fields_a_garbled_string_swallowed():
+    swallowed = {"facts": '[{"claim": "A"}]</parameter>\n<parameter name="conclusions">[{"text": "C", "fact_numbers": [1]}]'}
+    assert supervisor_service._clean_facts(swallowed) == {"facts": [{"claim": "A"}],
+                                                          "conclusions": [{"text": "C", "fact_numbers": [1]}]}
+    one_conclusion = {"conclusions": '\n<parameter name="text">Fees differ', "fact_numbers": "1, 2"}
+    assert supervisor_service._clean_facts(one_conclusion)["conclusions"] == [{"text": "Fees differ", "fact_numbers": "1, 2"}]
+
+
+def test_clean_facts_cuts_to_the_batch_limits():
+    cleaned = supervisor_service._clean_facts({"facts": [{"claim": str(i)} for i in range(30)],
+                                              "conclusions": [{"text": str(i)} for i in range(5)]})
+    assert (len(cleaned["facts"]), len(cleaned["conclusions"])) == (25, 3)

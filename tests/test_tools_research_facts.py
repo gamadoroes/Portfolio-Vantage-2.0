@@ -1,7 +1,18 @@
+from types import SimpleNamespace
+
+import anthropic
+import httpx
 import pytest
 
-from db.repositories import evidence_repo, projects_repo, research_runs_repo, tool_calls_repo
-from services import research_task_service, tools
+from db.repositories import (
+    agent_decisions_repo,
+    evidence_repo,
+    projects_repo,
+    research_runs_repo,
+    research_work_items_repo,
+    tool_calls_repo,
+)
+from services import research_task_service, supervisor_service, tools
 
 FACT = {"claim": "Deakin charges $3,000 per unit", "quote": "$3,000 per unit", "source_url": "https://deakin.edu.au/fees",
         "source_title": "Deakin fees", "publisher": "Deakin University", "published_date": "2026-02-01", "as_of": "2026"}
@@ -173,3 +184,145 @@ def test_zero_and_negative_fact_numbers_are_ignored(pid):
     (conclusion_id,) = result["conclusion_ids"]
     links = evidence_repo.conclusion_fact_links(pid)[conclusion_id]
     assert [fact_id for fact_id, _ in links] == [result["fact_ids"][1]]
+
+
+# ---- extract_research_facts: one paid call that only extracts facts ----
+
+REPORT = "Sources (1):\n- Deakin fees - https://deakin.edu.au/fees\n\nDeakin charges $3,000 per unit in 2026."
+
+
+class _Block:
+    def __init__(self, name, input):
+        self.type, self.name, self.input = "tool_use", name, input
+
+
+class _FakeClient:
+    def __init__(self, blocks=(), error=None):
+        self.calls, self._blocks, self._error = [], list(blocks), error
+        self.messages = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return SimpleNamespace(content=self._blocks)
+
+
+@pytest.fixture
+def app_context(pid):
+    from app import create_app
+    flask_app = create_app()
+    with flask_app.app_context():
+        yield flask_app
+
+
+def _install(monkeypatch, client):
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
+    return client
+
+
+def _finished(pid, status="COMPLETE", method="TARGETED_WEB", phase="4", output=REPORT):
+    card = _card(pid, phase=phase, method=method)
+    research_work_items_repo.update_fields(card, status=status, completeness_score=0.8, evidence_score=0.7)
+    research_runs_repo.create(f"run_{card}", pid, "resp", None, "p")
+    research_runs_repo.update(f"run_{card}", research_work_item_id=card, status="completed", output_text=output)
+    return card
+
+
+def _answer(facts=(FACT,), conclusions=()):
+    return _Block("record_research_facts", {"facts": list(facts), "conclusions": list(conclusions)})
+
+
+def _extract(card, caller="user"):
+    return tools.run_tool("extract_research_facts", caller, "P", {"task_id": card})
+
+
+def test_extract_saves_facts_without_touching_the_review(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    client = _install(monkeypatch, _FakeClient([_answer(conclusions=[{"text": "Deakin is pricey", "fact_numbers": [1]}])]))
+    result = _extract(card)
+    assert result.ok and len(result.data["fact_ids"]) == 1 and len(result.data["conclusion_ids"]) == 1
+    row = research_work_items_repo.get(card)
+    assert (row["status"], row["completeness_score"], row["evidence_score"]) == ("COMPLETE", 0.8, 0.7)
+    assert research_runs_repo.get(f"run_{card}")["facts_extracted_at"]
+    call = client.calls[0]
+    assert [t["name"] for t in call["tools"]] == ["record_research_facts"]
+    assert call["tool_choice"] == {"type": "tool", "name": "record_research_facts"}
+    assert call["max_tokens"] == 6000
+    assert "Deakin charges $3,000 per unit in 2026." in call["messages"][0]["content"]
+    child = next(r for r in tool_calls_repo.list_for_project(pid) if r["tool"] == "record_research_facts")
+    assert (child["caller"], child["parent_call_id"]) == ("supervisor", result.call_id)
+    assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)[:2]] == [
+        "user_extract_facts", "facts_recorded"]
+
+
+def test_the_system_extracts_after_a_review_without_a_you_line(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(card, caller="system").ok
+    assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)] == ["facts_recorded"]
+
+
+def test_a_second_click_does_not_call_claude_again(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    client = _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(card).ok
+    second = _extract(card)
+    assert second.error["code"] == "conflict" and len(client.calls) == 1
+
+
+def test_a_click_while_extracting_is_refused_without_a_call(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    research_runs_repo.claim_facts_extraction(f"run_{card}")  # the automatic step or another tab is extracting now
+    client = _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(card).error["code"] == "conflict" and client.calls == []
+
+
+def test_a_failed_claude_call_clears_the_claim(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient(error=anthropic.APIConnectionError(
+        request=httpx.Request("POST", "https://example.invalid"))))
+    assert _extract(card).error["code"] == "unavailable"
+    assert research_runs_repo.get(f"run_{card}")["facts_extracted_at"] is None
+    assert evidence_repo.list_facts(pid) == []
+
+
+def test_an_answer_with_no_usable_facts_leaves_the_button(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_answer(facts=[{"claim": ""}])]))
+    result = _extract(card)
+    assert result.ok and result.data["fact_ids"] == []
+    assert research_runs_repo.get(f"run_{card}")["facts_extracted_at"] is None
+
+
+def test_a_garbled_answer_is_cleaned_before_saving(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_Block("record_research_facts", {
+        "facts": '<parameter name="facts">[{"claim": "Deakin charges $3,000 per unit"}, {"claim": "cut',
+        "task_id": 99999})]))
+    result = _extract(card)
+    assert result.ok and [f["claim"] for f in evidence_repo.list_facts(pid)] == ["Deakin charges $3,000 per unit"]
+    assert evidence_repo.list_facts(pid)[0]["research_work_item_id"] == card  # the model cannot pick the research
+
+
+def test_a_click_that_saves_nothing_leaves_no_you_line(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_answer(facts=[{"claim": ""}])]))
+    assert _extract(card).ok
+    assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)] == ["facts_recorded"]  # no "You" line
+
+
+@pytest.mark.parametrize("make_card", [
+    lambda pid: _finished(pid, status="RUNNING"),
+    lambda pid: _finished(pid, method="SYNTHESIS", phase="7"),
+    lambda pid: _finished(pid, output=""),
+    lambda pid: _card(pid),
+])
+def test_extract_needs_a_finished_research_with_a_report(app_context, pid, monkeypatch, make_card):
+    client = _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(make_card(pid)).error["code"] == "conflict" and client.calls == []
+
+
+def test_the_supervisor_cannot_start_an_extraction(app_context, pid, monkeypatch):
+    client = _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(_finished(pid), caller="supervisor").error["code"] == "not_allowed" and client.calls == []

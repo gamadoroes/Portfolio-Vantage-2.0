@@ -508,3 +508,22 @@ def test_state_tolerates_gaps_and_focus_stored_as_strings(pid):
     card = next(c for c in board_service.get_board_state("P")["cards"] if c["id"] == card_id)
     assert card["gaps"] == ["First gap", "Second gap"]
     assert card["focus"] == ["Fees"]
+
+
+@pytest.mark.parametrize("detail,expected", [
+    ({"facts": 18, "conclusions": 2, "skipped": 0}, 'Supervisor saved 18 facts and 2 conclusions from "Fees".'),
+    ({"facts": 1, "conclusions": 0, "skipped": 3}, 'Supervisor saved 1 fact and 0 conclusions from "Fees" (3 skipped).'),
+    ({"facts": 0, "conclusions": 0, "skipped": 2}, 'Supervisor found no facts it could save in "Fees" (2 skipped).'),
+])
+def test_activity_reports_saved_facts(pid, detail, expected):
+    card_id = _card(pid)
+    agent_decisions_repo.record(pid, "facts_recorded", json.dumps(detail), research_work_item_id=card_id)
+    assert board_service.get_board_state("P")["activity"][0]["text"] == expected
+
+
+def test_activity_shows_the_you_extracted_facts_line(pid):
+    card_id = _card(pid)
+    agent_decisions_repo.record(pid, "user_extract_facts", json.dumps({"title": "Fees", "facts": 3, "conclusions": 1}),
+                                research_work_item_id=card_id)
+    assert board_service.get_board_state("P")["activity"][0] == {
+        **board_service.get_board_state("P")["activity"][0], "actor": "you", "text": 'You extracted facts from "Fees".'}
