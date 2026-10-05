@@ -54,6 +54,17 @@
         if (draft && draft.focus !== undefined) out.focus = splitFocus(draft.focus);
         return out;
     }
+    // The fields of an open editor that would really change the card, compared the way the
+    // server compares them (title, method and why are trimmed; the prompt is sent as typed).
+    function cardEdits(card, draft) {
+        const payload = editPayload(draft);
+        const trimmed = v => (v == null ? '' : String(v)).trim();
+        return Object.keys(payload).filter(k => {
+            if (k === 'focus') return payload.focus.join('\n') !== (card.focus || []).join('\n');
+            if (k === 'prompt_text') return (payload.prompt_text || '') !== (card.prompt_text || '');
+            return trimmed(payload[k]) !== trimmed(card[k]);
+        });
+    }
     function addPayload(project, a) {
         return {
             project, phase_key: a.phase_key, title: (a.title || '').trim(),
@@ -306,7 +317,7 @@
     }
 
     const pure = { STATUS, esc, newView, filterMatches, formatElapsed, pluralise, cardHtml, phaseHtml,
-                   runBoxHtml, chipsHtml, renderBoard, editPayload, addPayload, objectiveHtml };
+                   runBoxHtml, chipsHtml, renderBoard, editPayload, cardEdits, addPayload, objectiveHtml };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -428,12 +439,17 @@
         if (err.status === 404 || err.status === 409) refreshBoard();
     }
 
-    // One action at a time per card (or per board), so a double-click can't post twice.
+    // One action at a time per card (or per board-level slot), so a double-click can't post twice.
+    // Run has its own slot, so it is never blocked by drafting or adding.
     const inFlight = new Set();
 
-    async function attempt(cardId, fn) {
+    function slotKey(project, cardId, slot) {
+        return `${project}|${slot || (cardId == null ? 'board' : cardId)}`;
+    }
+
+    async function attempt(cardId, fn, slot) {
         const project = board.project;
-        const key = `${project}|${cardId == null ? 'board' : cardId}`;
+        const key = slotKey(project, cardId, slot);
         if (inFlight.has(key)) return;
         inFlight.add(key);
         if (cardId != null) delete board.view.cardErrors[cardId];
@@ -487,6 +503,13 @@
         },
         approve(el) {
             const id = Number(el.dataset.id);
+            const card = board.state && board.state.cards.find(c => c.id === id);
+            // Already approved and nothing changed: there is nothing to send.
+            if (card && card.status === 'READY' && !cardEdits(card, board.view.drafts[id]).length) {
+                closeEditor(id);
+                render();
+                return;
+            }
             attempt(id, async project => {
                 await saveDraftEdits(project, id);
                 const data = await cardAction(project, id, 'approve');
@@ -567,6 +590,11 @@
         'run-start'() {
             const ids = board.state.cards.filter(c => c.status === 'READY').map(c => c.id);
             board.view.confirming = false;
+            if (inFlight.has(slotKey(board.project, null, 'run'))) {
+                board.view.message = 'Your last Run is still starting. Wait a moment for the board to update.';
+                render();
+                return;
+            }
             render();  // the confirm panel goes away now, so it can't be clicked twice
             attempt(null, async project => {
                 const data = await call('POST', '/api/board/run', { project, card_ids: ids });
@@ -581,7 +609,7 @@
                 }
                 board.view.message = notes.join(' ');
                 takeState(data);
-            });
+            }, 'run');
         },
         'obj-edit'() {
             board.view.objEdit = true;

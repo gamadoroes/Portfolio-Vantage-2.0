@@ -109,6 +109,19 @@ test('payload helpers', () => {
     assert.deepStrictEqual(add, { project: 'P', phase_key: '2', title: 'Personas', research_method: 'TARGETED_WEB',
         focus: ['x'], rationale: '', draft_prompt: true, framework_key: null, prompt_text: '' });
 });
+test('cardEdits lists only fields that really change', () => {
+    const c = card({ status: 'READY' });
+    assert.deepStrictEqual(B.cardEdits(c, undefined), []);
+    assert.deepStrictEqual(B.cardEdits(c, {}), []);
+    // Typed and put back, or only whitespace the server trims: no change.
+    assert.deepStrictEqual(B.cardEdits(c, { title: ' Fees ', prompt_text: c.prompt_text, focus: 'Fees, ',
+                                            rationale: 'Price drives choice ', research_method: 'TARGETED_WEB' }), []);
+    assert.deepStrictEqual(B.cardEdits(c, { title: 'Fees 2026' }), ['title']);
+    assert.deepStrictEqual(B.cardEdits(c, { prompt_text: c.prompt_text + ' ' }), ['prompt_text']);
+    assert.deepStrictEqual(B.cardEdits(c, { focus: 'Fees, FEE-HELP' }), ['focus']);
+    assert.deepStrictEqual(B.cardEdits(c, { research_method: 'FILE_ANALYSIS' }), ['research_method']);
+    assert.deepStrictEqual(B.cardEdits(card({ rationale: null }), { rationale: '  ' }), []);
+});
 test('objective editor shows the unsaved draft, escaped, in preference to the saved objective', () => {
     const v = view(); v.objEdit = true;
     assert(B.objectiveHtml(state([]), v).includes('>Assess the market.</textarea>'));
