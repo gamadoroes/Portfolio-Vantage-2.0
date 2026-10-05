@@ -19,8 +19,9 @@ sys.path.insert(0, str(ROOT))
 WORK = Path(tempfile.mkdtemp(prefix="board-demo-"))
 os.environ["DATABASE_PATH"] = str(WORK / "demo.db")
 os.environ["BACKUP_DIR"] = str(WORK / "backups")
-os.environ.setdefault("ANTHROPIC_API_KEY", "demo")
-os.environ.setdefault("OPENAI_API_KEY", "demo")
+# Always fake keys, even if real ones are set in Windows or .env, so no real account is ever used.
+os.environ["ANTHROPIC_API_KEY"] = "demo"
+os.environ["OPENAI_API_KEY"] = "demo"
 os.chdir(WORK)
 
 from app import create_app  # noqa: E402
