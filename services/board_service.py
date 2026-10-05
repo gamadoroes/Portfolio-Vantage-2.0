@@ -376,9 +376,12 @@ def _settle_card(project_name, card, defer_linking):
         return 0
     linked = 0
     if run_row["prompt_text"]:  # only runs the board started produce report files
-        research_execution_service.save_report(project_name, card["id"], run_row["id"])
-        if not defer_linking and research_execution_service.link_report(project_name, card["id"], run_row["id"]):
-            linked = 1
+        try:
+            research_execution_service.save_report(project_name, card["id"], run_row["id"])
+            if not defer_linking and research_execution_service.link_report(project_name, card["id"], run_row["id"]):
+                linked = 1
+        except Exception as exc:  # the report is retried on the next refresh; the review need not wait
+            print(f"[board] could not save or link the report for research {card['id']}: {exc}")
     if card["status"] == "RUNNING":
         supervisor_service.review_card(project_name, card["id"])
     return linked

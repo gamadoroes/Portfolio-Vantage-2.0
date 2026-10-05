@@ -283,6 +283,19 @@ def test_refresh_defers_linking_while_insights_are_generating(pid, reviews):
     assert board_service.refresh("P")["linked_reports"] == 1
 
 
+@pytest.mark.parametrize("broken", ["save_report", "link_report"])
+def test_a_report_that_cannot_be_saved_or_linked_is_still_reviewed(pid, reviews, monkeypatch, capsys, broken):
+    def boom(*args, **kwargs):
+        raise OSError("file is locked")
+    monkeypatch.setattr(research_execution_service, broken, boom)
+    card_id = _card(pid, status="RUNNING")
+    _finished_run(pid, card_id)
+    state = board_service.refresh("P")
+    assert reviews == [card_id]
+    assert state["linked_reports"] == 0
+    assert "file is locked" in capsys.readouterr().out
+
+
 def test_refresh_fails_a_card_whose_run_failed(pid, reviews):
     card_id = _card(pid, status="RUNNING")
     _finished_run(pid, card_id, status="failed", output=None)
