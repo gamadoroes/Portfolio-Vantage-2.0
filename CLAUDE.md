@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Research Architect — a Flask single-page app for competitive landscape analysis in Australian higher education. Integrates Anthropic Claude (chat/edit) and OpenAI deep research APIs. All data is file-based (no database); projects live under `projects/{name}/` as JSON and plain text files.
+Research Architect — a Flask single-page app for competitive landscape analysis in Australian higher education. Integrates Anthropic Claude (chat/edit) and OpenAI deep research APIs. Most application state (chats, artefacts, research runs and tasks, insights history, sources) lives in a SQLite database (see "Database and backups" below); uploaded source documents and some per-project settings remain as files under `projects/{name}/`.
 
 For a full breakdown of routes/services/data model, the Deep Research lifecycle, and which parts of the Phase 1–7 workflow currently live in the backend vs. the browser, see `docs/ARCHITECTURE.md`.
 
@@ -71,8 +71,17 @@ Each project directory contains:
 
 ## Configuration
 
-API keys and model names are in `config.py`. Currently hardcoded — should use environment variables:
+Settings are read in `config.py` from environment variables, or from a `.env` file in the repo root (gitignored). **A real Windows environment variable beats `.env`** (python-dotenv does not override), so a stale variable in Windows can silently win over what `.env` says.
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
 - `ANTHROPIC_MODEL` (default: `claude-sonnet-4-5-20250929`)
 - `OPENAI_DEEP_RESEARCH_MODEL` (default: `o4-mini-deep-research`)
 - `FLASK_SECRET_KEY`
+- `DATABASE_PATH` and `BACKUP_DIR` (see below)
+
+## Database and backups
+
+- **Where the database lives.** `DATABASE_PATH`, default `C:\Users\<you>\PortfolioVantage\app.db` on Windows (`~/.local/share/PortfolioVantage/app.db` elsewhere). It is deliberately **not** inside OneDrive: syncing a live SQLite file can corrupt it. It is also deliberately **not** under `AppData`: the Microsoft Store build of Python silently redirects writes there into a private package folder that Explorer, backup tools and every other Python cannot see. The path is absolute, so it does not depend on the folder the app is launched from.
+- **Schema.** Migrations in `db/migrations/` are applied automatically on the first request after startup (not at import time).
+- **Daily snapshots.** Once a day, on a request, the app writes `app-YYYYMMDD-HHMMSS.db` into `BACKUP_DIR` (default `backups/` in the repo, gitignored) and keeps the newest 7. Each is a single, closed, consistent file written with SQLite's backup API, so it is safe to let OneDrive sync them. Only files with that exact name pattern are ever pruned. Code: `db/backup.py`.
+- **Restore.** Stop the app, copy a snapshot over the file at `DATABASE_PATH`, delete any `app.db-wal` / `app.db-shm` beside it, start the app.
+- **Tests** point `BACKUP_DIR` at a throwaway folder (`tests/conftest.py`) so a test run can never write to or prune real backups.
