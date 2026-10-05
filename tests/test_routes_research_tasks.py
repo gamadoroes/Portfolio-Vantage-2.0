@@ -130,3 +130,13 @@ def test_generic_transition_endpoint_is_gone(client):
     resp = client.post(f"/api/research-tasks/{task_id}/transition", json={"project": "P", "status": "RUNNING"})
     assert resp.status_code in (404, 405)
     assert research_work_items_repo.get(task_id)["status"] == "PROPOSED"
+
+
+def test_the_old_deep_research_start_endpoint_is_gone(client, monkeypatch):
+    from services import openai_service
+    sent = []
+    monkeypatch.setattr(openai_service, "start_deep_research", lambda prompt: sent.append(prompt))
+    client.post("/api/projects", json={"name": "P"})
+    resp = client.post("/api/deep-research/start", json={"project": "P", "prompt": "Research fees."})
+    assert resp.status_code in (404, 405)
+    assert sent == []

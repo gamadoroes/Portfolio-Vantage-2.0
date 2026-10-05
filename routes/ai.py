@@ -1,7 +1,7 @@
 import json
 import os
 
-from flask import Blueprint, Response, current_app, jsonify, request, send_file, session, stream_with_context
+from flask import Blueprint, Response, jsonify, request, send_file, session, stream_with_context
 
 from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions_locked
 from services.deep_research_output import extract_deep_research_output as _extract_deep_research_output
@@ -13,14 +13,12 @@ from services.file_index_service import (
 )
 from services.file_service import load_project_files
 from services.llm_service import edit_completion, prompt_completion, stream_chat_completion
-from services.openai_service import retrieve_deep_research, start_deep_research
+from services.openai_service import retrieve_deep_research
 from services.project_service import load_project_prompt, normalize_project_name, project_exists
 from services.research_run_service import (
     cancel_run,
     complete_run,
-    create_run,
     fail_run,
-    is_duplicate_run,
     load_runs,
     update_run,
 )
@@ -347,55 +345,6 @@ OUTPUT (rewritten text only):"""
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@ai_bp.route("/api/deep-research/start", methods=["POST"])
-def deep_research_start():
-    try:
-        data = request.get_json(silent=True) or {}
-        prompt = data.get("prompt", "").strip()
-        project = _existing_project_name(data.get("project") or session.get("current_project"))
-        chat_id = data.get("chat_id")
-
-        if not prompt:
-            return jsonify({"success": False, "error": "Prompt is required."}), 400
-        if not project:
-            return jsonify({"success": False, "error": "No project selected."}), 400
-
-        if not current_app.config.get("OPENAI_API_KEY"):
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "OpenAI deep research not configured.",
-                    }
-                ),
-                400,
-            )
-
-        if is_duplicate_run(project, prompt):
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "This research prompt was already submitted moments ago. Please wait for it to complete.",
-                    }
-                ),
-                409,
-            )
-
-        print("[deep-research] start (background)")
-        response = start_deep_research(prompt)
-        run_id = create_run(project, response.id, chat_id, prompt)
-        return jsonify({
-            "success": True,
-            "response_id": response.id,
-            "run_id": run_id,
-            "status": response.status,
-        })
-    except Exception as e:
-        print(f"[deep-research] error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @ai_bp.route("/api/deep-research/status/<response_id>", methods=["GET"])
