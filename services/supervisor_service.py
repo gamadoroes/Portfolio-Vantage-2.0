@@ -28,6 +28,7 @@ MAX_GAPS_CHARS = 300
 # Known facts get their own budget inside the briefing (not one of the review limits in review_limits.py),
 # so however many facts a project has, they cannot push the rest of the briefing out.
 MAX_KNOWN_FACTS_CHARS = 4000
+MORE_NOT_SHOWN = "  ({} more not shown)"
 KNOWN_FACTS_HEADING = "# KNOWN FACTS (already established by earlier research; do not research these again)"
 
 _clip_run_output = clip_text  # existing call sites keep their name
@@ -111,21 +112,40 @@ def _decision_block(decisions, truncated):
 
 
 def _known_facts_block(known, titles):
+    """Every phase with active facts gets its header and count; the claim lines then share what is left of
+    MAX_KNOWN_FACTS_CHARS (the whole section, heading included) round-robin, newest first, so one busy phase
+    cannot push the others out. A phase whose claims were cut says how many are not shown."""
     if not known:
         return f"{KNOWN_FACTS_HEADING}\n\n(no facts recorded yet)"
-    lines = []
-    for key in sorted(known):
+    keys = sorted(known)
+    headers, pending = {}, {}
+    for key in keys:
         entry = known[key]
         noun = "fact" if entry["count"] == 1 else "facts"
-        lines.append(f"- Phase {key} ({titles.get(key, key)}): {entry['count']} {noun}. Most recent:")
-        lines.extend(f"  - {_one_line(claim, 200)}" for claim in entry["recent"])
-    body, used = [], 0
-    for line in lines:
-        if used + len(line) + 1 > MAX_KNOWN_FACTS_CHARS:
-            body.append("  (more known facts not shown)")
-            break
-        body.append(line)
-        used += len(line) + 1
+        headers[key] = f"- Phase {key} ({titles.get(key, key)}): {entry['count']} {noun}. Most recent:"
+        pending[key] = [f"  - {_one_line(claim, 200)}" for claim in entry["recent"]]
+    # Reserve room for every phase's "(n more not shown)" line, and the section heading, up front.
+    reserved = len(KNOWN_FACTS_HEADING) + 2 + sum(
+        len(headers[k]) + 1 + len(MORE_NOT_SHOWN.format(known[k]["count"])) + 1 for k in keys)
+    remaining = MAX_KNOWN_FACTS_CHARS - reserved
+    shown = {key: [] for key in keys}
+    open_phases = list(keys)
+    while open_phases:
+        for key in list(open_phases):
+            queue = pending[key]
+            if not queue or len(queue[0]) + 1 > remaining:
+                open_phases.remove(key)  # this phase is done: out of claims, or the next one does not fit
+                continue
+            line = queue.pop(0)
+            shown[key].append(line)
+            remaining -= len(line) + 1
+    body = []
+    for key in keys:
+        body.append(headers[key])
+        body.extend(shown[key])
+        not_shown = known[key]["count"] - len(shown[key])
+        if not_shown > 0:
+            body.append(MORE_NOT_SHOWN.format(not_shown))
     return f"{KNOWN_FACTS_HEADING}\n\n" + "\n".join(body)
 
 
@@ -518,5 +538,8 @@ def _extract_after_review(project_name, card, outcome):
         message = result.error["message"]
     except Exception as exc:  # run_tool does not raise; this only guarantees the review is never affected
         message = f"{type(exc).__name__}: {exc}"
-    print(f"[supervisor] facts were not extracted from research {card['id']}: {message}")
+    try:  # the review is already saved: a console that cannot show the text must not undo that
+        print(f"[supervisor] facts were not extracted from research {card['id']}: {ascii(message)}")
+    except Exception:
+        pass
     return {"ok": False, "error": message}

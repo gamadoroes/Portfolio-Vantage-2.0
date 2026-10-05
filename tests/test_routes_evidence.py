@@ -24,14 +24,16 @@ def client(tmp_path, monkeypatch):
     set_database_path(None)
 
 
-def _seed():
-    pid = projects_repo.get_or_create_id("P")
+def _seed(project="P", facts=None):
+    pid = projects_repo.get_or_create_id(project)
     card = research_task_service.create_task(pid, "4", "Fees", research_method="TARGETED_WEB")
-    data = tools.run_tool("record_research_facts", "supervisor", "P", {"task_id": card, "facts": [
+    facts = facts or [
         {"claim": "Deakin charges $3,000 per unit", "source_url": "https://deakin.example/fees",
          "source_title": "Deakin fees", "as_of": "2026"},
         {"claim": "Monash runs three intakes", "quote": "three intakes a year"},
-    ], "conclusions": [{"text": "Fees and intakes differ", "fact_numbers": [1, 2]}]}).data
+    ]
+    data = tools.run_tool("record_research_facts", "supervisor", project, {"task_id": card, "facts": facts,
+                          "conclusions": [{"text": "Fees and intakes differ", "fact_numbers": [1, 2]}]}).data
     return card, data
 
 
@@ -92,6 +94,52 @@ def test_reject_a_conclusion(client):
 def test_unknown_things_are_404(client, url):
     _seed()
     assert client.post(url, json={"project": "P"}).status_code == 404
+
+
+OTHER_FACTS = [{"claim": "Torrens charges $2,500 per unit"}, {"claim": "Federation runs two intakes"}]
+
+
+def _other_project(client):
+    """Project Q with its own facts and conclusion, and project P with its own."""
+    client.post("/api/projects", json={"name": "Q"})
+    _, mine = _seed("P")
+    _, theirs = _seed("Q", OTHER_FACTS)
+    return mine, theirs
+
+
+def _q_rows(client):
+    phase = client.get("/api/evidence?project=Q").get_json()["phases"]["4"]
+    return {f["id"]: f["status"] for f in phase["facts"]}, {c["id"]: c["status"] for c in phase["conclusions"]}
+
+
+@pytest.mark.parametrize("action", ["reject", "restore"])
+def test_a_fact_or_conclusion_of_another_project_cannot_be_changed(client, action):
+    _, theirs = _other_project(client)
+    facts_before, conclusions_before = _q_rows(client)
+    for kind, item in (("fact", theirs["fact_ids"][0]), ("conclusion", theirs["conclusion_ids"][0])):
+        resp = client.post(f"/api/evidence/{kind}/{item}/{action}", json={"project": "P"})
+        assert resp.status_code == 404 and resp.get_json()["success"] is False
+    assert _q_rows(client) == (facts_before, conclusions_before)
+    assert set(facts_before.values()) == {"active"}
+
+
+def test_the_other_project_changes_only_through_its_own_name(client):
+    _, theirs = _other_project(client)
+    fact_id = theirs["fact_ids"][0]
+    assert client.post(f"/api/evidence/fact/{fact_id}/reject", json={"project": "Q"}).status_code == 200
+    assert _q_rows(client)[0][fact_id] == "rejected"
+
+
+def test_list_and_search_never_include_another_projects_facts(client):
+    mine, theirs = _other_project(client)
+    listed = client.get("/api/evidence?project=P").get_json()["phases"]["4"]
+    assert [f["id"] for f in listed["facts"]] == mine["fact_ids"]
+    assert [c["id"] for c in listed["conclusions"]] == mine["conclusion_ids"]
+    assert not set(theirs["fact_ids"]) & {f["id"] for f in listed["facts"]}
+    assert client.get("/api/evidence/search?project=P&q=torrens").get_json()["facts"] == []
+    assert client.get("/api/evidence/search?project=P&q=intakes").get_json()["facts"][0]["claim"] == "Monash runs three intakes"
+    found = client.get("/api/evidence/search?project=Q&q=intakes").get_json()["facts"]
+    assert [f["claim"] for f in found] == ["Federation runs two intakes"]
 
 
 def test_no_project_is_400(client):

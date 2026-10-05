@@ -190,7 +190,7 @@ ALREADY_EXTRACTED = "Facts are already being taken from this report, or have bee
 def can_extract_facts(card, run):
     """Whether the "Extract facts" button shows for this card and its latest run."""
     return (card["status"] in EXTRACTABLE_STATUSES and card["research_method"] != "SYNTHESIS"
-            and run is not None and bool(run["output_text"]) and not run["facts_extracted_at"])
+            and run is not None and bool(run["output_text"]) and research_runs_repo.extraction_available(run))
 
 
 class ExtractInput(ToolInput):
@@ -213,7 +213,9 @@ def extract_research_facts(ctx, inputs):
     except Exception:
         research_runs_repo.release_facts_extraction(run["id"])  # nothing was taken: the person can try again
         raise
-    if not data["fact_ids"]:
+    if data["fact_ids"]:
+        research_runs_repo.finish_facts_extraction(run["id"])  # done for good, however old
+    else:
         research_runs_repo.release_facts_extraction(run["id"])
     if ctx.caller == "user" and data["fact_ids"]:  # no line for the automatic step, or when nothing was saved
         record_user_action(ctx, "user_extract_facts", inputs.task_id,

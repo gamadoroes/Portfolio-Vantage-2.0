@@ -164,6 +164,22 @@ test('the report reader escapes the title', () => {
     assert(!html.includes('<img') && html.includes('&lt;img'));
 });
 
+test('a poll re-render while facts are being extracted keeps the Extracting placeholder', () => {
+    // the server has already claimed the report, so it reports can_extract_facts false while the call runs
+    const c = card({ status: 'COMPLETE', can_extract_facts: false, run: { has_report: true } });
+    const v = view(); v.extracting[7] = true;
+    const html = B.cardHtml(c, state([]), v);
+    assert(html.includes('Extracting facts') && !html.includes('data-act="extract-open"'));
+    assert(!B.cardHtml(c, state([]), view()).includes('Extracting facts'));
+});
+test('the reader keeps its Extract facts button unless facts were actually saved', () => {
+    assert(B.extractSaved({ result: { fact_ids: [4, 5], conclusion_ids: [] } }) === true);
+    assert(B.extractSaved({ result: { fact_ids: [], conclusion_ids: [] } }) === false);
+    assert(B.extractSaved({ result: {} }) === false);
+    assert(B.extractSaved({}) === false);
+    assert(B.extractSaved(null) === false);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try { fn(); console.log('ok -', name); } catch (e) { failed++; console.log('FAIL -', name, '\n ', e.message); }

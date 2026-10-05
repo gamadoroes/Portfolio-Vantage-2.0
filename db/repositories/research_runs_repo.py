@@ -60,24 +60,59 @@ def find_latest_for_work_item(work_item_id):
         ).fetchone()
 
 
-def claim_facts_extraction(id):
-    """Mark this run's report as mined for facts. True only for the call that set it, so a
-    double-click (or two tabs) cannot pay for the same report twice.
+# facts_extracted_at holds one of three things: NULL (never claimed), an ISO time (a claim: a call is in
+# flight, or died), or "done:<ISO time>" (the report was mined). A done value is never stale.
+DONE_PREFIX = "done:"
 
-    A claim older than STALE_EXTRACTION_MINUTES that produced no fact is taken to be a call that died
-    with the process, and can be claimed again."""
+
+def _has_facts(conn, run_id):
+    return conn.execute("SELECT 1 FROM facts WHERE run_id = ? LIMIT 1", (run_id,)).fetchone() is not None
+
+
+def extraction_available(run_row, now=None):
+    """Whether this run's report may be mined for facts now: never claimed, or a claim older than
+    STALE_EXTRACTION_MINUTES (a call that died) on a run with no facts. A finished extraction never is.
+    claim_facts_extraction applies the same rule atomically."""
+    claimed = run_row["facts_extracted_at"]
+    if claimed is None:
+        return True
+    if claimed.startswith(DONE_PREFIX):
+        return False
+    cutoff = ((now or datetime.now()) - timedelta(minutes=STALE_EXTRACTION_MINUTES)).isoformat()
+    if claimed >= cutoff:
+        return False
+    with get_connection() as conn:  # only a stale claim needs the facts lookup
+        return not _has_facts(conn, run_row["id"])
+
+
+def claim_facts_extraction(id):
+    """Mark this run's report as being mined for facts. True only for the call that set it, so a
+    double-click (or two tabs) cannot pay for the same report twice. The rule is extraction_available's."""
     now = datetime.now()
     cutoff = (now - timedelta(minutes=STALE_EXTRACTION_MINUTES)).isoformat()
     with get_connection() as conn:
         cur = conn.execute(
             "UPDATE research_runs SET facts_extracted_at = ? WHERE id = ? AND (facts_extracted_at IS NULL "
-            "OR (facts_extracted_at < ? AND NOT EXISTS (SELECT 1 FROM facts WHERE run_id = ?)))",
+            "OR (facts_extracted_at NOT LIKE 'done:%' AND facts_extracted_at < ? "
+            "AND NOT EXISTS (SELECT 1 FROM facts WHERE run_id = ?)))",
             (now.isoformat(), id, cutoff, id),
         )
         return cur.rowcount == 1
 
 
-def release_facts_extraction(id):
-    """Undo a claim when nothing was taken from the report, so the person can try again."""
+def finish_facts_extraction(id):
+    """The report was mined: mark it done for good (never stale, never released)."""
     with get_connection() as conn:
-        conn.execute("UPDATE research_runs SET facts_extracted_at = NULL WHERE id = ?", (id,))
+        conn.execute("UPDATE research_runs SET facts_extracted_at = ? WHERE id = ?",
+                     (DONE_PREFIX + datetime.now().isoformat(), id))
+
+
+def release_facts_extraction(id):
+    """Undo a claim when nothing was taken from the report, so the person can try again. Never frees a
+    finished extraction, or a report that already has facts saved from it (it must not be paid for twice)."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE research_runs SET facts_extracted_at = NULL WHERE id = ? "
+            "AND facts_extracted_at NOT LIKE 'done:%' AND NOT EXISTS (SELECT 1 FROM facts WHERE run_id = ?)",
+            (id, id),
+        )

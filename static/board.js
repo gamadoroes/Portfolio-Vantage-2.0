@@ -164,9 +164,10 @@
     }
     const EXTRACT_CONFIRM = 'Take the facts from this report? This makes one paid Claude call.';
     function extractHtml(card, view) {
-        if (!card.can_extract_facts) return '';
         const id = card.id;
+        // While the call runs the server has already claimed the report (can_extract_facts is false), so check this first.
         if (view.extracting && view.extracting[id]) return '<div class="rb-row"><button type="button" class="rb-btn" disabled>Extracting facts…</button></div>';
+        if (!card.can_extract_facts) return '';
         if (view.confirmExtract === id) {
             return `<div class="rb-confirm" role="group" aria-label="Confirm extract facts"><p class="rb-small">${EXTRACT_CONFIRM}</p>`
                 + `<div class="rb-row"><button type="button" class="rb-btn primary" data-act="extract-start" data-id="${id}">Extract facts</button>`
@@ -335,9 +336,15 @@
         return `<div class="rb-reader-head"><h3>${esc(report.title)}</h3><div class="rb-reader-actions">${extract}<button type="button" class="rb-btn" data-reader-close>Close</button></div></div>`;
     }
 
+    // True only when the extract-facts response says at least one fact was saved.
+    function extractSaved(data) {
+        const result = data && data.result;
+        return !!(result && Array.isArray(result.fact_ids) && result.fact_ids.length > 0);
+    }
+
     const pure = { STATUS, esc, newView, filterMatches, formatElapsed, pluralise, cardHtml, phaseHtml,
                    runBoxHtml, chipsHtml, renderBoard, editPayload, cardEdits, addPayload, objectiveHtml,
-                   extractHtml, EXTRACT_CONFIRM, readerHeadHtml };
+                   extractHtml, EXTRACT_CONFIRM, readerHeadHtml, extractSaved };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -700,16 +707,21 @@
     async function extractFromReader(report, button) {
         if (!window.confirm(EXTRACT_CONFIRM)) return;
         const project = board.project;
-        const old = button.parentNode.querySelector('.rb-err');
-        if (old) old.remove();
+        button.parentNode.querySelectorAll('.rb-err, .rb-note').forEach(el => el.remove());
         button.disabled = true;
         button.textContent = 'Extracting facts…';
         try {
             const data = await cardAction(project, report.id, 'extract-facts');
             const note = document.createElement('span');
-            note.className = 'rb-small';
+            note.className = 'rb-small rb-note';
             note.textContent = data.note || 'Done.';
-            button.replaceWith(note);
+            if (extractSaved(data)) {
+                button.replaceWith(note);
+            } else {  // nothing was saved (or an unexpected answer): the button stays so the person can try again
+                button.disabled = false;
+                button.textContent = 'Extract facts';
+                button.before(note);
+            }
             if (project === board.project) { board.view.message = data.note || ''; takeState(data); }
         } catch (err) {
             button.disabled = false;

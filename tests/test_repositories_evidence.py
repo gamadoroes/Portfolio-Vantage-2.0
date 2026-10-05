@@ -146,3 +146,67 @@ def test_a_stale_claim_on_a_run_that_has_a_fact_stays_claimed(pid):
 def test_a_recent_claim_cannot_be_claimed_again(pid):
     _claimed_minutes_ago(1, pid=pid)
     assert research_runs_repo.claim_facts_extraction("run_1") is False
+
+
+def _available(run_id="run_1"):
+    return research_runs_repo.extraction_available(research_runs_repo.get(run_id))
+
+
+def test_availability_follows_the_same_rule_as_the_claim(pid):
+    research_runs_repo.create("run_1", pid, None, None, "p")
+    assert _available() is True  # never claimed
+    assert research_runs_repo.claim_facts_extraction("run_1") is True
+    assert _available() is False  # a fresh claim: a call is in flight
+    later = datetime.now() + timedelta(minutes=16)
+    row = research_runs_repo.get("run_1")
+    assert research_runs_repo.extraction_available(row, now=later) is True  # stale and no facts: the call died
+
+
+def test_a_stale_claim_on_a_run_with_facts_is_not_available(pid):
+    card = _card(pid)
+    _claimed_minutes_ago(16, pid=pid)
+    assert _available() is True
+    _fact(pid, card, "From that report", run_id="run_1")
+    assert _available() is False
+
+
+def test_a_finished_extraction_is_never_available_again(pid):
+    research_runs_repo.create("run_1", pid, None, None, "p")
+    assert research_runs_repo.claim_facts_extraction("run_1") is True
+    research_runs_repo.finish_facts_extraction("run_1")
+    assert research_runs_repo.get("run_1")["facts_extracted_at"].startswith("done:")
+    later = datetime.now() + timedelta(hours=3)
+    assert research_runs_repo.extraction_available(research_runs_repo.get("run_1"), now=later) is False
+    assert research_runs_repo.claim_facts_extraction("run_1") is False
+
+
+def test_a_done_run_stays_done_when_its_facts_were_all_duplicates(pid):
+    # every fact in this report already existed, so none carries this run's id
+    research_runs_repo.create("run_1", pid, None, None, "p")
+    research_runs_repo.create("run_0", pid, None, None, "p")
+    _fact(pid, _card(pid), "Already known", run_id="run_0")
+    research_runs_repo.claim_facts_extraction("run_1")
+    research_runs_repo.finish_facts_extraction("run_1")
+    # even with the stored time moved far back, 'done' is not a stale claim
+    stored = research_runs_repo.get("run_1")["facts_extracted_at"]
+    assert stored.startswith("done:")
+    later = datetime.now() + timedelta(days=2)
+    assert research_runs_repo.extraction_available(research_runs_repo.get("run_1"), now=later) is False
+    assert research_runs_repo.claim_facts_extraction("run_1") is False
+
+
+def test_release_does_nothing_on_a_done_run(pid):
+    research_runs_repo.create("run_1", pid, None, None, "p")
+    research_runs_repo.claim_facts_extraction("run_1")
+    research_runs_repo.finish_facts_extraction("run_1")
+    research_runs_repo.release_facts_extraction("run_1")
+    assert research_runs_repo.get("run_1")["facts_extracted_at"].startswith("done:")
+
+
+def test_release_does_nothing_when_facts_were_saved_from_the_run(pid):
+    research_runs_repo.create("run_1", pid, None, None, "p")
+    research_runs_repo.claim_facts_extraction("run_1")
+    _fact(pid, _card(pid), "Saved before the error", run_id="run_1")
+    research_runs_repo.release_facts_extraction("run_1")
+    assert research_runs_repo.get("run_1")["facts_extracted_at"]
+    assert research_runs_repo.claim_facts_extraction("run_1") is False

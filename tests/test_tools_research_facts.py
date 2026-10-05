@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import anthropic
@@ -13,6 +14,7 @@ from db.repositories import (
     tool_calls_repo,
 )
 from services import research_task_service, supervisor_service, tools
+from services.tools import research_facts
 
 FACT = {"claim": "Deakin charges $3,000 per unit", "quote": "$3,000 per unit", "source_url": "https://deakin.edu.au/fees",
         "source_title": "Deakin fees", "publisher": "Deakin University", "published_date": "2026-02-01", "as_of": "2026"}
@@ -221,8 +223,8 @@ def _install(monkeypatch, client):
     return client
 
 
-def _finished(pid, status="COMPLETE", method="TARGETED_WEB", phase="4", output=REPORT):
-    card = _card(pid, phase=phase, method=method)
+def _finished(pid, status="COMPLETE", method="TARGETED_WEB", phase="4", output=REPORT, title="Fees"):
+    card = _card(pid, phase=phase, method=method, title=title)
     research_work_items_repo.update_fields(card, status=status, completeness_score=0.8, evidence_score=0.7)
     research_runs_repo.create(f"run_{card}", pid, "resp", None, "p")
     research_runs_repo.update(f"run_{card}", research_work_item_id=card, status="completed", output_text=output)
@@ -276,6 +278,61 @@ def test_a_click_while_extracting_is_refused_without_a_call(app_context, pid, mo
     research_runs_repo.claim_facts_extraction(f"run_{card}")  # the automatic step or another tab is extracting now
     client = _install(monkeypatch, _FakeClient([_answer()]))
     assert _extract(card).error["code"] == "conflict" and client.calls == []
+
+
+def test_a_finished_extraction_is_marked_done(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(card).ok
+    assert research_runs_repo.get(f"run_{card}")["facts_extracted_at"].startswith("done:")
+
+
+def test_an_extraction_whose_facts_were_all_known_before_is_still_done(app_context, pid, monkeypatch):
+    first, second = _finished(pid), _finished(pid, title="Fees again")
+    client = _install(monkeypatch, _FakeClient([_answer(), _answer()]))
+    assert _extract(first).ok
+    again = _extract(second)  # the same claim: its fact carries the first report's run id
+    assert again.ok and len(again.data["fact_ids"]) == 1
+    assert evidence_repo.list_facts(pid)[0]["run_id"] == f"run_{first}"
+    row = research_runs_repo.get(f"run_{second}")
+    assert row["facts_extracted_at"].startswith("done:")
+    later = datetime.now() + timedelta(hours=1)
+    assert research_runs_repo.extraction_available(row, now=later) is False
+    assert research_runs_repo.claim_facts_extraction(f"run_{second}") is False
+    assert len(client.calls) == 2
+
+
+def test_a_stale_claim_from_a_dead_call_offers_the_button_and_can_be_retaken(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    old = (datetime.now() - timedelta(minutes=16)).isoformat()
+    research_runs_repo.update(f"run_{card}", facts_extracted_at=old)
+    run = research_runs_repo.find_latest_for_work_item(card)
+    assert research_facts.can_extract_facts(research_work_items_repo.get(card), run) is True
+    client = _install(monkeypatch, _FakeClient([_answer()]))
+    assert _extract(card).ok and len(client.calls) == 1
+    run = research_runs_repo.find_latest_for_work_item(card)
+    assert research_facts.can_extract_facts(research_work_items_repo.get(card), run) is False
+
+
+def test_a_fresh_claim_does_not_offer_the_button(app_context, pid):
+    card = _finished(pid)
+    research_runs_repo.claim_facts_extraction(f"run_{card}")
+    run = research_runs_repo.find_latest_for_work_item(card)
+    assert research_facts.can_extract_facts(research_work_items_repo.get(card), run) is False
+
+
+def test_an_error_after_facts_were_saved_does_not_free_the_report(app_context, pid, monkeypatch):
+    card = _finished(pid)
+    _install(monkeypatch, _FakeClient([_answer()]))
+
+    def save_then_fail(project_name, task_id, parent_call_id=None):
+        evidence_repo.get_or_create_fact(pid, "4", card, "Saved", "saved", run_id=f"run_{card}")
+        raise RuntimeError("late failure")
+
+    monkeypatch.setattr(supervisor_service, "extract_facts", save_then_fail)
+    assert _extract(card).ok is False
+    assert research_runs_repo.get(f"run_{card}")["facts_extracted_at"]  # not released: the facts are in
+    assert research_runs_repo.claim_facts_extraction(f"run_{card}") is False
 
 
 def test_a_failed_claude_call_clears_the_claim(app_context, pid, monkeypatch):
