@@ -40,6 +40,7 @@ python -m pytest tests/ -v
   - `reference_integrity_service.py` — Cleans stale file references on delete
   - `research_run_service.py` — Tracks deep research run state
   - `docx_service.py` — DOCX report generation with OES branding (Valencia #FF8A00, Ink #001738, Sky #82CBD4)
+  - `tools/` — the Supervisor tool layer: every Supervisor action, and the board's status/run actions, go through `tools.run_tool(name, caller, project, inputs)` — pydantic-validated inputs, structured results, a per-tool list of allowed callers (`supervisor` / `user` / `system`) and a log row in `tool_calls`. The Supervisor can only use the tools on its menus (`supervisor_service.DRAFTING_MENU`, `REVIEW_MENU`); anything that spends money or changes what runs is user/system-only. To let the Supervisor use a tool later, add `"supervisor"` to that tool's `callers` (and to a menu).
 
 ### Frontend
 
