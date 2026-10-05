@@ -259,7 +259,21 @@ def run(project_name, card_ids):
         ids = [int(i) for i in card_ids]
     except (TypeError, ValueError) as exc:
         raise ValueError("card_ids must be a list of research ids") from exc
-    result = research_execution_service.start_runs(project_name, ids)
+    project_id = projects_repo.get_id(project_name)
+    result = {"started": [], "not_ready": [], "failed": []}
+    synthesis, others = [], []
+    for card_id in ids:
+        row = research_work_items_repo.get(card_id)
+        if row is None or row["project_id"] != project_id:  # as before: an unknown card is "not ready", not an error
+            result["not_ready"].append(card_id)
+        else:
+            (synthesis if row["research_method"] == "SYNTHESIS" else others).append(card_id)
+    parts = ([_user_tool(project_name, "launch_deep_research", {"task_ids": others})] if others else []) + [
+        _user_tool(project_name, "generate_synthesis", {"task_id": card_id}) for card_id in synthesis
+    ]
+    for part in parts:
+        for key in result:
+            result[key].extend(part[key])
     if result["started"]:
         _record(project_name, "user_run", count=len(result["started"]))
     return result
@@ -323,7 +337,7 @@ def _settle_card(project_name, card, defer_linking):
     if run_row is None:
         return 0
     if card["status"] == "RUNNING" and run_row["status"] in ("failed", "cancelled"):
-        research_task_service.transition_task(card["id"], "FAILED")
+        run_tool("update_task_status", "system", project_name, {"task_id": card["id"], "action": "run_failed"})
         return 0
     # The options report writes Insights itself and is never reviewed.
     if card["research_method"] == "SYNTHESIS" or run_row["status"] != "completed" or not run_row["output_text"]:
@@ -347,7 +361,11 @@ def refresh(project_name, defer_linking=False):
     lock = _lock_for(project_name)
     if lock.acquire(blocking=False):  # another tab's refresh is already doing this work
         try:
-            research_execution_service.sync_web_research_runs(project_name)
+            for card in research_work_items_repo.list_for_project(project_id):
+                if card["status"] == "RUNNING" and card["research_method"] == "TARGETED_WEB":
+                    run_row = research_runs_repo.find_latest_for_work_item(card["id"])
+                    if research_execution_service.needs_web_sync(run_row):
+                        run_tool("check_research_run", "system", project_name, {"task_id": card["id"]})
             _release_stale_review_claims(project_id)
             _fail_abandoned_local_runs(project_name, project_id)
             for card in research_work_items_repo.list_for_project(project_id):

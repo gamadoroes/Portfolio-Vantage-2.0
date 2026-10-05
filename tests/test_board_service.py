@@ -251,8 +251,9 @@ def test_options_report_draft_needs_phase_7_unlocked_and_only_one_open(pid):
 def test_run_records_the_users_run(pid, monkeypatch):
     monkeypatch.setattr(research_execution_service, "start_runs",
                         lambda project_name, ids: {"started": list(ids), "not_ready": [], "failed": []})
-    result = board_service.run("P", ["5", 6])
-    assert result["started"] == [5, 6]
+    first, second = _card(pid, status="READY"), _card(pid, status="READY")
+    result = board_service.run("P", [str(first), second])
+    assert result["started"] == [first, second]
     assert _last_decision(pid) == "user_run"
 
 

@@ -233,42 +233,44 @@ def _format_web_research_output(text, citations):
     return f"Sources ({len(sources)}):\n" + "\n".join(lines) + "\n\n" + text
 
 
-def sync_web_research_runs(project_name):
-    """Pull the outcome of TARGETED_WEB runs from OpenAI into research_runs.
+def needs_web_sync(run):
+    return _needs_web_sync(run)
 
-    Called by the Research board's refresh (board_service.refresh), so a finished web run
-    gets its report text saved and becomes reviewable. The legacy browser poller only ever
-    saves a status, never the text.
-    """
+
+def sync_web_research_run(project_name, run):
+    """Check one web run with OpenAI and store its outcome. Raises if OpenAI can't be reached."""
+    response = openai_service.retrieve_deep_research(run["response_id"])
+    status = getattr(response, "status", None)
+    if status == "completed":
+        text, _markdown, citations = extract_deep_research_output(response)
+        if text:
+            research_run_service.update_run(
+                project_name, run["id"], status="completed",
+                output_text=_format_web_research_output(text, citations),
+                completed_at=datetime.now().isoformat(),
+            )
+        else:
+            research_run_service.fail_run(
+                project_name, run["id"], "OpenAI reported the research finished but returned no text"
+            )
+    elif status in ("failed", "incomplete", "cancelled"):
+        research_run_service.fail_run(
+            project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
+        )
+    # queued / in_progress: still working; checked again on the next refresh.
+
+
+def sync_web_research_runs(project_name):
+    """Check every unfinished web run of the project (kept for callers that want all at once)."""
     project_id = projects_repo.get_or_create_id(project_name)
     for item in research_work_items_repo.list_for_project(project_id):
         run = research_runs_repo.find_latest_for_work_item(item["id"])
         if not _needs_web_sync(run):
             continue
         try:
-            response = openai_service.retrieve_deep_research(run["response_id"])
+            sync_web_research_run(project_name, run)
         except Exception as exc:  # one flaky lookup must not block the whole refresh
             print(f"[board] could not check web research run {run['id']}: {exc}")
-            continue
-
-        status = getattr(response, "status", None)
-        if status == "completed":
-            text, _markdown, citations = extract_deep_research_output(response)
-            if text:
-                research_run_service.update_run(
-                    project_name, run["id"], status="completed",
-                    output_text=_format_web_research_output(text, citations),
-                    completed_at=datetime.now().isoformat(),
-                )
-            else:
-                research_run_service.fail_run(
-                    project_name, run["id"], "OpenAI reported the research finished but returned no text"
-                )
-        elif status in ("failed", "incomplete", "cancelled"):
-            research_run_service.fail_run(
-                project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
-            )
-        # queued / in_progress: still working; checked again on the next refresh.
 
 
 METHOD_LABELS = {"TARGETED_WEB": "Web research", "FILE_ANALYSIS": "My files", "SYNTHESIS": "Options report"}
