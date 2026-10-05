@@ -36,6 +36,7 @@ USER_METHODS = ("TARGETED_WEB", "FILE_ANALYSIS")
 EDITABLE_STATUSES = ("PROPOSED", "READY")
 OPEN_STATUSES = ("PROPOSED", "READY", "RUNNING", "REVIEWING")
 OPTIONS_REPORT_TITLE = "Options for OES report"
+FOCUS_ITEMS, FOCUS_ITEM_CHARS = 10, 120  # the most create_research_task accepts for a focus list
 LAUNCH_BATCH = 20  # launch_deep_research takes at most this many cards per call
 
 
@@ -132,7 +133,8 @@ def create_card(project_name, data):
     draft = bool(data.get("draft_prompt"))
     task = {
         "phase_key": phase_key, "title": title, "research_method": method,
-        "focus": _clean_focus(data.get("focus")), "rationale": (data.get("rationale") or "").strip(),
+        "focus": [f[:FOCUS_ITEM_CHARS] for f in _clean_focus(data.get("focus"))][:FOCUS_ITEMS],
+        "rationale": (data.get("rationale") or "").strip(),
         "framework_key": data.get("framework_key") or None,
         # A typed prompt is ignored when the user asked for one to be drafted, as before.
         "prompt_text": None if draft else (data.get("prompt_text") or "").strip() or None,
@@ -263,11 +265,14 @@ def run(project_name, card_ids):
     project_id = projects_repo.get_id(project_name)
     result = {"started": [], "not_ready": [], "failed": []}
     synthesis, others = [], []
+    ready_when_pressed = set()
     for card_id in ids:
         row = research_work_items_repo.get(card_id)
         if row is None or row["project_id"] != project_id:  # as before: an unknown card is "not ready", not an error
             result["not_ready"].append(card_id)
         else:
+            if row["status"] == "READY":
+                ready_when_pressed.add(card_id)
             (synthesis if row["research_method"] == "SYNTHESIS" else others).append(card_id)
     parts = [("launch_deep_research", {"task_ids": others[i:i + LAUNCH_BATCH]}, others[i:i + LAUNCH_BATCH])
              for i in range(0, len(others), LAUNCH_BATCH)]
@@ -279,7 +284,13 @@ def run(project_name, card_ids):
             for key in result:
                 result[key].extend(outcome.data[key])
         else:
-            result["failed"].extend({"id": card_id, "error": outcome.error["message"]} for card_id in part_ids)
+            # The part stopped partway: cards before the break may already be running (and paid for).
+            for card_id in part_ids:
+                row = research_work_items_repo.get(card_id)
+                if card_id in ready_when_pressed and row is not None and row["status"] == "RUNNING":
+                    result["started"].append(card_id)
+                else:
+                    result["failed"].append({"id": card_id, "error": outcome.error["message"]})
     if result["started"]:
         _record(project_name, "user_run", count=len(result["started"]))
     return result
@@ -520,6 +531,9 @@ def _activity_item(decision, by_id):
     elif dtype == "review_outcome":
         outcome = detail.get("input", {}).get("outcome")
         text = f'Supervisor reviewed "{title}": {_OUTCOME_TEXT.get(outcome, outcome)}.'
+    elif dtype == "off_menu_tool":
+        tool = str(detail.get("tool", "a tool"))[:100]
+        text = f"Supervisor tried to use {tool}, which it isn't allowed to. Nothing ran."
     elif dtype == "review_error":
         text = f'The review of "{title}" didn\'t complete. It will be retried.'
     else:

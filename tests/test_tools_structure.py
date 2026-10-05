@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from pathlib import Path
@@ -44,14 +45,59 @@ def test_every_other_tool_refuses_the_supervisor(temp_db, name):
     assert research_work_items_repo.get(card)["status"] == "PROPOSED"
 
 
-FORBIDDEN_IMPORTS = re.compile(r"^\s*(from|import)\s+(db\.connection|sqlite3|os|pathlib|shutil)\b|from \.\.\.?db\.connection", re.M)
+FORBIDDEN_TOP_LEVEL = {"os", "shutil", "sqlite3", "subprocess", "pathlib", "importlib", "io", "builtins"}
+
+
+def _forbidden_module(module, names=()):
+    """True if `from <module> import <names>` (or `import <module>`) reaches the database connection or files."""
+    parts = module.split(".") if module else []
+    if parts[:1] and parts[0] in FORBIDDEN_TOP_LEVEL:
+        return True
+    if "db" in parts and "connection" in parts[parts.index("db"):]:
+        return True
+    return parts[-1:] == ["db"] and "connection" in names
+
+
+def forbidden_things(source):
+    """Everything in a module's source that lets it reach the database connection or the file system directly."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found += [f"import {a.name}" for a in node.names if _forbidden_module(a.name)]
+        elif isinstance(node, ast.ImportFrom):
+            if _forbidden_module(node.module or "", [a.name for a in node.names]):
+                found.append(f"from {'.' * node.level}{node.module or ''} import ...")
+        elif isinstance(node, ast.Call):
+            callee = node.func
+            if isinstance(callee, ast.Name) and callee.id in ("open", "__import__"):
+                found.append(f"{callee.id}(...)")
+            elif (isinstance(callee, ast.Attribute) and callee.attr == "open"
+                  and isinstance(callee.value, ast.Name) and callee.value.id in ("io", "builtins", "os")):
+                found.append(f"{callee.value.id}.open(...)")
+    return found
 
 
 @pytest.mark.parametrize("path", sorted(TOOLS_DIR.glob("*.py")), ids=lambda p: p.name)
 def test_tool_modules_cannot_touch_the_database_or_files_directly(path):
-    source = path.read_text(encoding="utf-8")
-    assert not FORBIDDEN_IMPORTS.search(source), f"{path.name} imports a forbidden module"
-    assert not re.search(r"(?<![\w.])open\(", source), f"{path.name} calls open("
+    assert forbidden_things(path.read_text(encoding="utf-8")) == [], f"{path.name} reaches the database or files directly"
+
+
+@pytest.mark.parametrize("source", [
+    "import json, os", "import os.path", "from db import connection", "from db.connection import get_connection",
+    "from ..db.connection import x", "from .. import db; from ...db import connection as c", "import sqlite3",
+    "from pathlib import Path", "import shutil as sh", "import subprocess", "io.open('x')", "builtins.open('x')",
+    "os.open('x', 0)", "open('x')", "__import__('os')",
+])
+def test_the_structure_check_catches_forbidden_access(source):
+    assert forbidden_things(source), source
+
+
+@pytest.mark.parametrize("source", [
+    "import json", "import osmosis", "from db.repositories import projects_repo", "from .. import research_task_service",
+    "from .registry import Tool", "x = reopen(1); self.open_door()",
+])
+def test_the_structure_check_allows_harmless_code(source):
+    assert forbidden_things(source) == [], source
 
 
 FORBIDDEN_FIELDS = re.compile(r"(path|file|filename|sql|query|table)", re.I)

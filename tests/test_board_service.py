@@ -211,6 +211,17 @@ def test_create_card_with_my_own_prompt(pid):
     assert row["framework_key"] == "oes-student-persona"
 
 
+def test_create_card_with_a_long_focus_list_keeps_working(pid):
+    focus = ", ".join([f"Item {i}" for i in range(11)] + ["y" * 200])
+    card_id = board_service.create_card("P", {"phase_key": "2", "title": "Personas", "research_method": "FILE_ANALYSIS",
+                                              "focus": focus, "prompt_text": GOOD_PROMPT})
+    stored = json.loads(research_work_items_repo.get(card_id)["entities_json"])
+    assert len(stored) == 10 and stored[0] == "Item 0"
+    long_one = board_service.create_card("P", {"phase_key": "2", "title": "More", "research_method": "FILE_ANALYSIS",
+                                               "focus": ["y" * 200], "prompt_text": GOOD_PROMPT})
+    assert json.loads(research_work_items_repo.get(long_one)["entities_json"]) == ["y" * 120]
+
+
 def test_create_card_drafted_for_me(pid):
     card_id = board_service.create_card("P", {"phase_key": "3", "title": "Sentiment", "research_method": "TARGETED_WEB",
                                               "framework_key": "oes-marketing-sentiment", "draft_prompt": True})
@@ -261,6 +272,30 @@ def test_run_records_the_users_run(pid, monkeypatch):
     assert _last_decision(pid) == "user_run"
 
 
+def test_a_part_that_fails_midway_still_reports_the_runs_it_already_started(pid, monkeypatch):
+    from types import SimpleNamespace
+    sent = []
+    monkeypatch.setattr(research_execution_service.openai_service, "start_deep_research",
+                        lambda prompt: sent.append(prompt) or SimpleNamespace(id=f"resp_{len(sent)}", status="queued"))
+    real_claim = research_task_service.claim_transition
+    claims = []
+
+    def flaky_claim(card_id, from_status, to_status):
+        claims.append(card_id)
+        if len(claims) == 2:
+            raise RuntimeError("database is locked")
+        return real_claim(card_id, from_status, to_status)
+
+    monkeypatch.setattr(research_task_service, "claim_transition", flaky_claim)
+    cards = [_card(pid, status="READY", title=f"Fees {i}") for i in range(3)]
+    result = board_service.run("P", cards)
+    assert result["started"] == [cards[0]]
+    assert [f["id"] for f in result["failed"]] == cards[1:]
+    assert all(f["error"] for f in result["failed"])
+    assert _status(cards[0]) == "RUNNING" and _status(cards[1]) == "READY"
+    assert _last_decision(pid) == "user_run"
+
+
 # ---- refresh ----
 
 def _finished_run(pid, card_id, run_id="run_1", prompt_text=GOOD_PROMPT, status="completed", output="Report body."):
@@ -284,6 +319,46 @@ def test_refresh_saves_links_and_reviews_a_finished_research(pid, reviews):
     assert run["report_stable_file_id"] and run["report_linked_at"]
     assert state["linked_reports"] == 1
     assert reviews == [card_id]
+
+
+def _waiting_web_card(pid):
+    card_id = _card(pid, status="RUNNING")
+    research_runs_repo.create("run_1", pid, "resp_1", None, "preview")
+    research_runs_repo.update("run_1", research_work_item_id=card_id, status="running", prompt_text=GOOD_PROMPT)
+    return card_id
+
+
+def test_refresh_collects_a_finished_web_report_then_reviews_it(pid, reviews, monkeypatch):
+    from types import SimpleNamespace
+    card_id = _waiting_web_card(pid)
+    content = [SimpleNamespace(type="output_text", text="The web report.", annotations=[])]
+    asked = []
+    monkeypatch.setattr(research_execution_service.openai_service, "retrieve_deep_research",
+                        lambda rid: asked.append(rid) or SimpleNamespace(
+                            id=rid, status="completed", output_text="The web report.",
+                            output=[SimpleNamespace(type="message", content=content)], error=None, last_error=None))
+    board_service.refresh("P")
+    assert asked == ["resp_1"]
+    run = research_runs_repo.get("run_1")
+    assert run["status"] == "completed" and run["output_text"].endswith("The web report.")
+    assert run["report_stable_file_id"]
+    assert reviews == [card_id]
+
+
+def test_refresh_survives_openai_being_unreachable_and_keeps_the_card_running(pid, reviews, monkeypatch):
+    import httpx
+    import openai
+    card_id = _waiting_web_card(pid)
+
+    def unreachable(rid):
+        raise openai.APIConnectionError(request=httpx.Request("GET", "https://api.openai.com"))
+
+    monkeypatch.setattr(research_execution_service.openai_service, "retrieve_deep_research", unreachable)
+    state = board_service.refresh("P")
+    assert _status(card_id) == "RUNNING"
+    assert research_runs_repo.get("run_1")["output_text"] is None
+    assert reviews == []
+    assert state["cards"]
 
 
 def test_refresh_defers_linking_while_insights_are_generating(pid, reviews):
@@ -394,6 +469,14 @@ def test_stale_summaries_compare_browser_utc_with_server_local_time(pid, generat
     report_time = _local_naive(datetime(2026, 10, 5, 1, 30, tzinfo=timezone.utc))
     research_runs_repo.update("run_1", completed_at=report_time, report_stable_file_id="f_x")
     assert board_service.get_board_state("P")["phase7"]["summaries_stale"] is stale
+
+
+def test_activity_says_plainly_when_the_supervisor_tried_a_tool_it_may_not_use(pid):
+    agent_decisions_repo.record(pid, "off_menu_tool", json.dumps({"tool": "launch_deep_research" + "x" * 200}))
+    text = board_service.get_board_state("P")["activity"][0]["text"]
+    assert text.startswith("Supervisor tried to use launch_deep_research")
+    assert text.endswith("which it isn't allowed to. Nothing ran.")
+    assert len(text) < 200
 
 
 def test_activity_reads_in_plain_words(pid):

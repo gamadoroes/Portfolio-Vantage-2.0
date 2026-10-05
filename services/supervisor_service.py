@@ -17,6 +17,7 @@ from .review_limits import (
 )
 from .text_utils import as_text_list, clip_text
 from .tools import claude_tools, run_tool
+from .tools import review as review_tool
 
 # Each task line also carries what the card is about, kept short.
 MAX_FOCUS_CHARS = 150
@@ -216,10 +217,37 @@ def draft_researches(project_name):
     result = run_tool(block.name, "supervisor", project_name, block.input, menu=DRAFTING_MENU)
     execution = ({"success": True, "result": result.data} if result.ok
                  else {"success": False, "error": result.error["message"]})
-    agent_decisions_repo.record(
-        project_id, decision_type=block.name, detail=json.dumps({"input": block.input, "execution": execution}),
-    )
+    if not result.ok and result.error["code"] == "not_allowed":
+        # The model asked for something it may not use. Record that plainly; nothing ran.
+        agent_decisions_repo.record(
+            project_id, decision_type="off_menu_tool",
+            detail=json.dumps({"tool": str(block.name)[:100], "input": block.input, "execution": execution}),
+        )
+    else:
+        agent_decisions_repo.record(
+            project_id, decision_type=block.name, detail=json.dumps({"input": block.input, "execution": execution}),
+        )
     return {"action": block.name, "input": block.input, "execution": execution}
+
+
+def _clean_review_input(raw):
+    """The model's review, trimmed to the tool's limits so a long answer cannot fail a paid review."""
+    cleaned = dict(raw)
+    cleaned["identified_gaps"] = [g[:review_tool.GAP_CHARS]
+                                  for g in as_text_list(cleaned.get("identified_gaps"))][:review_tool.GAP_ITEMS]
+    cleaned["reason"] = str(cleaned.get("reason") or "").strip()[:review_tool.REASON_CHARS]
+    followup = cleaned.pop("followup", None)
+    title = str(followup.get("title") or "").strip()[:review_tool.FOLLOWUP_TITLE_CHARS] if isinstance(followup, dict) else ""
+    if title:  # without a usable title there is no follow-up; the review still goes ahead
+        method = followup.get("research_method")
+        cleaned["followup"] = {
+            "title": title,
+            "focus": [f[:review_tool.FOLLOWUP_FOCUS_CHARS]
+                      for f in as_text_list(followup.get("focus"))][:review_tool.FOLLOWUP_FOCUS_ITEMS],
+            "research_method": method if method in review_tool.FOLLOWUP_METHODS else None,
+            "rationale": str(followup.get("rationale") or "").strip()[:review_tool.FOLLOWUP_RATIONALE_CHARS],
+        }
+    return cleaned
 
 
 def review_card(project_name, card_id):
@@ -248,7 +276,7 @@ def review_card(project_name, card_id):
         block = _tool_use(response, "evaluate_research_output")
         if block is None:
             raise RuntimeError("The Supervisor did not return a review.")
-        inputs = dict(block.input)
+        inputs = _clean_review_input(block.input)
         inputs["task_id"] = card_id  # the system, not the model, decides which card is being reviewed
         result = run_tool("evaluate_research_output", "supervisor", project_name, inputs, menu=REVIEW_MENU)
         if not result.ok:

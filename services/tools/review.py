@@ -12,24 +12,29 @@ from .registry import Tool, ToolError, register, run_tool
 from .types import CardId, Text, Title, ToolInput, text_list
 
 Outcome = Literal["COMPLETE", "FOLLOW_UP_REQUIRED", "NEEDS_HUMAN", "FAILED"]
+# Limits of the review input; the Supervisor clips the model's text to these before calling the tool.
+GAP_ITEMS, GAP_CHARS = 20, 500
+FOLLOWUP_TITLE_CHARS, FOLLOWUP_FOCUS_ITEMS, FOLLOWUP_FOCUS_CHARS, FOLLOWUP_RATIONALE_CHARS = 200, 10, 120, 1000
+REASON_CHARS = 2000
+FOLLOWUP_METHODS = ("TARGETED_WEB", "FILE_ANALYSIS")
 
 
 class FollowupSuggestion(ToolInput):
     title: Title
-    focus: text_list(10, 120) = []
+    focus: text_list(FOLLOWUP_FOCUS_ITEMS, FOLLOWUP_FOCUS_CHARS) = []
     research_method: Literal["TARGETED_WEB", "FILE_ANALYSIS"] | None = None
-    rationale: Text(1000) = ""
+    rationale: Text(FOLLOWUP_RATIONALE_CHARS) = ""
 
 
 class EvaluateInput(ToolInput):
     task_id: CardId
     completeness_score: float = Field(ge=0, le=1, description="Did it answer the prompt? 0 to 1.")
     evidence_score: float = Field(ge=0, le=1, description="Are its claims sourced? 0 to 1.")
-    identified_gaps: text_list(20, 500) = []
+    identified_gaps: text_list(GAP_ITEMS, GAP_CHARS) = []
     outcome: Outcome = Field(description="COMPLETE if good enough; FOLLOW_UP_REQUIRED if specific gaps need another "
                                          "research (describe it in followup); NEEDS_HUMAN if a person must judge it; "
                                          "FAILED if it produced nothing usable.")
-    reason: Text(2000) = ""
+    reason: Text(REASON_CHARS) = ""
     followup: FollowupSuggestion | None = None
 
 

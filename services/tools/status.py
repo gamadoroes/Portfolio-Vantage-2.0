@@ -14,8 +14,20 @@ from .registry import Tool, ToolError, register, run_tool
 from .types import CardId, ToolInput
 
 MIN_PROMPT_CHARS = 40
-USER_ACTIONS = ("approve", "back_to_draft", "skip", "restore", "retry", "accept", "mark_failed", "needs_followup")
-SYSTEM_ACTIONS = ("run_failed",)
+# Who may use each action. Deny by default: a caller that is not listed (e.g. the supervisor) gets nothing.
+ACTION_CALLERS = {
+    "approve": frozenset({"user"}),
+    "back_to_draft": frozenset({"user"}),
+    "skip": frozenset({"user"}),
+    "restore": frozenset({"user"}),
+    "retry": frozenset({"user"}),
+    "accept": frozenset({"user"}),
+    "mark_failed": frozenset({"user"}),
+    "needs_followup": frozenset({"user"}),
+    "run_failed": frozenset({"system"}),
+}
+USER_ACTIONS = tuple(a for a, callers in ACTION_CALLERS.items() if "user" in callers)
+SYSTEM_ACTIONS = tuple(a for a, callers in ACTION_CALLERS.items() if "system" in callers)
 CHANGED = "This research has changed since the board was loaded. The board has been refreshed."
 WAITS = "This research waits for another research to finish first."
 _FRIENDLY = (
@@ -139,9 +151,8 @@ _ACTIONS = {
 
 
 def update_task_status(ctx, inputs):
-    allowed = USER_ACTIONS if ctx.caller == "user" else SYSTEM_ACTIONS
-    if inputs.action not in allowed:
-        raise ToolError("not_allowed", f"{inputs.action} cannot be used by the {ctx.caller}.")
+    if ctx.caller not in ACTION_CALLERS[inputs.action]:
+        raise ToolError("not_allowed", f"The {ctx.caller} cannot use the action {inputs.action}.")
     card = research_work_items_repo.get(inputs.task_id)
     return {"task_id": inputs.task_id, "new_status": _ACTIONS[inputs.action](ctx, card)}
 

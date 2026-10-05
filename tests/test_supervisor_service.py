@@ -434,6 +434,48 @@ def test_follow_up_arrives_as_a_new_draft(temp_db, app_context, drafted, monkeyp
     assert research_work_items_repo.list_dependencies(card_id) == []
 
 
+def test_a_review_with_over_long_fields_is_clipped_not_failed(temp_db, app_context, drafted, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    bulleted = chr(10).join(f"- gap number {i}" for i in range(25))
+    block = _review("FOLLOW_UP_REQUIRED", identified_gaps=bulleted, reason="r" * 3000, followup={
+        "title": "t" * 500, "focus": ["f" * 300 for _ in range(15)], "research_method": "TARGETED_WEB",
+        "rationale": "x" * 2000})
+    block.input["identified_gaps"] += chr(10) + "- " + "g" * 600
+    _install(monkeypatch, _FakeClient([block]))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True
+    row = research_work_items_repo.get(card_id)
+    assert row["status"] == "FOLLOW_UP_REQUIRED"
+    gaps = json.loads(row["identified_gaps_json"])
+    assert len(gaps) == 20 and all(len(g) <= 500 for g in gaps)
+    follow = research_work_items_repo.get(result["followup_task_id"])
+    assert len(follow["title"]) <= 200
+    assert len(json.loads(follow["entities_json"])) <= 10
+    assert all(len(f) <= 120 for f in json.loads(follow["entities_json"]))
+    assert agent_decisions_repo.list_for_project(pid)[0]["decision_type"] == "review_outcome"
+
+
+def test_a_long_gap_and_a_long_reason_do_not_fail_a_human_review(temp_db, app_context, monkeypatch):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review("NEEDS_HUMAN", identified_gaps=["g" * 600], reason="r" * 3000)]))
+    assert supervisor_service.review_card("P", card_id)["reviewed"] is True
+    row = research_work_items_repo.get(card_id)
+    assert row["status"] == "WAITING_FOR_HUMAN"
+    assert [len(g) for g in json.loads(row["identified_gaps_json"])] == [500]
+
+
+@pytest.mark.parametrize("followup", ["not a dict", {"title": "   ", "focus": ["x"]}, {"focus": ["x"]}, ["a"]])
+def test_an_unusable_followup_is_dropped_and_the_review_still_succeeds(temp_db, app_context, monkeypatch, followup):
+    pid = projects_repo.get_or_create_id("P")
+    card_id = _running_card(pid)
+    _install(monkeypatch, _FakeClient([_review("FOLLOW_UP_REQUIRED", followup=followup)]))
+    result = supervisor_service.review_card("P", card_id)
+    assert result["reviewed"] is True and result["followup_task_id"] is None
+    assert research_work_items_repo.get(card_id)["status"] == "FOLLOW_UP_REQUIRED"
+
+
 def test_complete_on_a_card_already_flagged_for_a_person_waits_for_them(temp_db, app_context, monkeypatch):
     pid = projects_repo.get_or_create_id("P")
     card_id = _running_card(pid, human_review_required=True)
@@ -522,17 +564,26 @@ def test_helpers_and_limits_moved_without_changing_values():
     assert text_utils.clip_text("abc", 3) == "abc"
 
 
-def test_an_off_menu_tool_from_the_model_runs_nothing(temp_db, app_context, drafted, monkeypatch):
+@pytest.mark.parametrize("name,tool_input", [
+    ("launch_deep_research", None),  # not a supervisor tool at all
+    ("request_human_review", {"reason": "look at this"}),  # a supervisor tool, but not on the drafting menu
+])
+def test_an_off_menu_tool_from_the_model_runs_nothing(temp_db, app_context, drafted, monkeypatch, name, tool_input):
     pid = projects_repo.get_or_create_id("P")
     card = research_task_service.create_task(pid, "4", "Fees", research_method="TARGETED_WEB", prompt_text="x" * 50)
     research_work_items_repo.update_fields(card, status="READY")
-    _install(monkeypatch, _FakeClient([_Block("launch_deep_research", {"task_ids": [card]})]))
+    _install(monkeypatch, _FakeClient([_Block(name, dict(tool_input or {"task_ids": [card]}, **({"task_id": card} if tool_input else {})))]))
     result = supervisor_service.draft_researches("P")
     assert result["execution"]["success"] is False
     assert research_work_items_repo.get(card)["status"] == "READY"
     from db.repositories import tool_calls_repo
     log = tool_calls_repo.list_for_project(pid)[0]
-    assert (log["tool"], log["caller"], log["error_code"]) == ("launch_deep_research", "supervisor", "not_allowed")
+    assert (log["tool"], log["caller"], log["error_code"]) == (name, "supervisor", "not_allowed")
+    decision = agent_decisions_repo.list_for_project(pid)[0]
+    detail = json.loads(decision["detail"])
+    assert decision["decision_type"] == "off_menu_tool"
+    assert detail["tool"] == name
+    assert detail["execution"]["success"] is False
 
 
 def test_the_reviewed_card_is_chosen_by_the_system_not_the_model(temp_db, app_context, monkeypatch):

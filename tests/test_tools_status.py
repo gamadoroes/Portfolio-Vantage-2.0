@@ -69,6 +69,25 @@ def test_callers_only_get_their_actions(pid, caller, action):
     assert _act(card, action, caller=caller).error["code"] == "not_allowed"
 
 
+ALL_ACTIONS = ("approve", "back_to_draft", "skip", "restore", "retry", "accept", "mark_failed", "needs_followup", "run_failed")
+
+
+@pytest.mark.parametrize("caller", ["user", "system", "supervisor"])
+@pytest.mark.parametrize("action", ALL_ACTIONS)
+def test_the_handler_itself_allows_only_the_listed_caller_per_action(pid, monkeypatch, caller, action):
+    # Widen the registry's own caller check so only the handler's per-action check decides.
+    monkeypatch.setattr(tools.get_tool("update_task_status"), "callers", frozenset({"user", "system", "supervisor"}))
+    card = _card(pid)
+    result = _act(card, action, caller=caller)
+    allowed = {"run_failed": {"system"}}.get(action, {"user"})
+    if caller in allowed:
+        assert result.ok or result.error["code"] != "not_allowed"
+    else:
+        assert result.error["code"] == "not_allowed"
+        assert result.error["message"] == f"The {caller} cannot use the action {action}."
+        assert research_work_items_repo.get(card)["status"] == "PROPOSED"
+
+
 @pytest.mark.parametrize("prompt,method", [("Too short", "TARGETED_WEB"), (None, "TARGETED_WEB"),
                                            (prompt_drafting_service.FALLBACK_MARKER + " Research question: Fees and more", "TARGETED_WEB"),
                                            (GOOD, None)])
