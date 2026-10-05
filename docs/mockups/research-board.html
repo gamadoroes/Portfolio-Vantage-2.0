@@ -1,0 +1,651 @@
+<title>Vantage Research Board</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: a plan board grouped by research phase on the left; a right rail with the Run box and the activity feed.
+   The Supervisor drafts, the person edits and approves, and nothing runs until Run is pressed.
+   Palette is the OES brand already used in the app: Ink navy, Valencia orange, Sky blue, on cool neutrals. */
+:root{
+  --ink:#001738; --valencia:#FF8A00; --sky:#82CBD4;
+  --bg:#F3F5F9; --surface:#FFFFFF; --surface-2:#E9EEF4; --line:#D3DBE6; --line-strong:#AEBBCC;
+  --fg:#0B1B33; --muted:#53617A; --accent-text:#A04E00; --on-accent:#001738; --focus:#0B5FD6;
+  --needs-bg:#FFEFCB; --needs-fg:#6F4300;
+  --appr-bg:#D6EFF3; --appr-fg:#09505B;
+  --run-bg:#FFE0BA; --run-fg:#7A3A00;
+  --done-bg:#D8F1DF; --done-fg:#145F36;
+  --fu-bg:#E5E0FA; --fu-fg:#3C2C86;
+  --skip-bg:#E4E9F0; --skip-fg:#46536A;
+  --err:#A31F1F; --track:#DCE3EC;
+  --font:'Figtree',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#08121F; --surface:#0F1C31; --surface-2:#15253F; --line:#233652; --line-strong:#3A5075;
+    --fg:#E6ECF6; --muted:#9BAAC2; --accent-text:#FFA84A; --on-accent:#001738; --focus:#7FB2FF;
+    --needs-bg:#3A2B0B; --needs-fg:#FFD68C;
+    --appr-bg:#0E3A41; --appr-fg:#9FDDE6;
+    --run-bg:#3F2608; --run-fg:#FFC27F;
+    --done-bg:#12351F; --done-fg:#9DE2B6;
+    --fu-bg:#2A2452; --fu-fg:#CCC1FF;
+    --skip-bg:#1C2A40; --skip-fg:#A9B6CB;
+    --err:#FF9C9C; --track:#22344F; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#08121F; --surface:#0F1C31; --surface-2:#15253F; --line:#233652; --line-strong:#3A5075;
+  --fg:#E6ECF6; --muted:#9BAAC2; --accent-text:#FFA84A; --on-accent:#001738; --focus:#7FB2FF;
+  --needs-bg:#3A2B0B; --needs-fg:#FFD68C;
+  --appr-bg:#0E3A41; --appr-fg:#9FDDE6;
+  --run-bg:#3F2608; --run-fg:#FFC27F;
+  --done-bg:#12351F; --done-fg:#9DE2B6;
+  --fu-bg:#2A2452; --fu-fg:#CCC1FF;
+  --skip-bg:#1C2A40; --skip-fg:#A9B6CB;
+  --err:#FF9C9C; --track:#22344F; color-scheme:dark;
+}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.45;padding-inline:16px;padding-block:0 56px}
+*{box-sizing:border-box}
+h1,h2,h3,h4,p,ol,ul{margin:0;padding:0}
+ol,ul{list-style:none}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.wrap{max-width:1240px;margin:0 auto}
+
+/* sample-data banner */
+.banner{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;margin:0 -16px;padding:8px 16px;background:var(--ink);color:#fff;font-size:13px}
+.banner button{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.45);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px}
+.banner button:hover{background:rgba(255,255,255,.12)}
+
+/* header */
+.head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px 24px;padding-block:24px 8px}
+.head h1{font-size:28px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+.proj{color:var(--muted);font-size:14px;margin-top:2px}
+.proj b{color:var(--fg);font-weight:600}
+.steps{display:flex;flex-wrap:wrap;gap:6px 8px}
+.steps li{display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:13px;font-weight:500;color:var(--muted)}
+.steps li .n{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--surface-2);font-family:var(--mono);font-size:11px;color:var(--muted)}
+.steps li.done{color:var(--fg)}
+.steps li.done .n{background:var(--done-bg);color:var(--done-fg)}
+.steps li.now{border-color:var(--valencia);color:var(--fg);box-shadow:0 0 0 2px color-mix(in srgb,var(--valencia) 25%,transparent)}
+.steps li.now .n{background:var(--valencia);color:var(--on-accent);font-weight:600}
+
+/* layout */
+.grid{display:grid;gap:20px;margin-top:16px;grid-template-columns:minmax(0,1fr);grid-template-areas:"run" "obj" "plan" "act"}
+@media (min-width:1000px){
+  .grid{grid-template-columns:minmax(0,1fr) 340px;grid-template-areas:"obj run" "plan run" "plan act";align-items:start}
+}
+#objective{grid-area:obj}#plan{grid-area:plan}#runbox{grid-area:run}#activity{grid-area:act}
+@media (min-width:1000px){#runbox{position:sticky;top:12px}}
+
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px}
+.panel h3{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+
+/* objective + supervisor */
+.obj-text{margin-top:8px;font-size:16px;max-width:70ch}
+.obj-actions,.row{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.sup{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.sup p{max-width:60ch}
+.sup b{font-weight:600}
+
+/* buttons */
+.btn{border:1px solid var(--line-strong);background:var(--surface);color:var(--fg);border-radius:8px;padding:7px 14px;font-weight:600;font-size:14px;cursor:pointer;min-height:36px}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--valencia);border-color:var(--valencia);color:var(--on-accent)}
+.btn.primary:hover{background:color-mix(in srgb,var(--valencia) 88%,#fff)}
+.btn.quiet{border-color:transparent;background:transparent;color:var(--accent-text)}
+.btn.quiet:hover{background:var(--surface-2)}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.btn.wide{width:100%}
+
+/* filters */
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.chip{display:flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:var(--fg)}
+.chip .c{font-family:var(--mono);font-size:12px;color:var(--muted);font-weight:500}
+.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+.chip[aria-pressed="true"] .c{color:#C9D6EA}
+:root[data-theme="dark"] .chip[aria-pressed="true"]{background:var(--valencia);border-color:var(--valencia);color:var(--on-accent)}
+:root[data-theme="dark"] .chip[aria-pressed="true"] .c{color:var(--on-accent)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .chip[aria-pressed="true"]{background:var(--valencia);border-color:var(--valencia);color:var(--on-accent)}
+  :root:not([data-theme="light"]) .chip[aria-pressed="true"] .c{color:var(--on-accent)}
+}
+
+/* phases */
+.phase{margin-bottom:12px}
+.phase-head{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:transparent;border:0;padding:8px 2px;cursor:pointer}
+.phase-head .chev{transition:transform .15s;flex:none;color:var(--muted)}
+.phase-head[aria-expanded="false"] .chev{transform:rotate(-90deg)}
+.phase-num{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--muted);flex:none}
+.phase-name{font-size:17px;font-weight:700}
+.phase-sum{margin-left:auto;font-size:13px;color:var(--muted);text-align:right}
+.phase-body{display:flex;flex-direction:column;gap:10px;padding-left:0}
+.empty{padding:14px;border:1px dashed var(--line-strong);border-radius:10px;color:var(--muted);font-size:14px}
+.locked{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface);color:var(--muted);font-size:14px}
+.locked svg{flex:none;margin-top:2px}
+.locked b{color:var(--fg)}
+
+/* cards */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card.open{border-color:var(--line-strong);box-shadow:0 2px 10px rgba(0,23,56,.08)}
+.card-top{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px 12px}
+.card h4{font-size:16px;font-weight:600;flex:1 1 260px;min-width:0;text-wrap:balance}
+.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;font-size:12.5px;font-weight:600;white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.s-needs{background:var(--needs-bg);color:var(--needs-fg)}
+.s-appr{background:var(--appr-bg);color:var(--appr-fg)}
+.s-run{background:var(--run-bg);color:var(--run-fg)}
+.s-done{background:var(--done-bg);color:var(--done-fg)}
+.s-fu{background:var(--fu-bg);color:var(--fu-fg)}
+.s-skip{background:var(--skip-bg);color:var(--skip-fg)}
+.s-run i{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+.meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.tag{font-size:12.5px;padding:2px 8px;border-radius:6px;background:var(--surface-2);color:var(--muted);font-weight:500}
+.tag.method{background:var(--surface-2);color:var(--fg);font-weight:600}
+.preview{margin-top:8px;color:var(--muted);font-size:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
+.from{margin-top:8px;font-size:13px;color:var(--muted)}
+
+/* edit form */
+.form{display:grid;gap:12px;margin-top:12px}
+.form label,.lbl{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
+.form input[type="text"],.form textarea,.runbox select,#objective textarea{width:100%;border:1px solid var(--line-strong);border-radius:8px;background:var(--bg);padding:8px 10px;min-width:0}
+.form textarea{min-height:190px;resize:vertical;font-family:var(--mono);font-size:13px;line-height:1.55}
+#objective textarea{min-height:84px;resize:vertical;margin-top:8px}
+.seg{display:flex;flex-wrap:wrap;gap:8px}
+.seg label{display:flex;align-items:center;gap:8px;margin:0;font-weight:500;border:1px solid var(--line-strong);border-radius:8px;padding:7px 12px;cursor:pointer;background:var(--bg)}
+.seg input{accent-color:var(--valencia)}
+.hint{font-size:13px;color:var(--muted)}
+.err{color:var(--err);font-size:13px;font-weight:600}
+
+/* running + review */
+.progress{margin-top:12px}
+.bar{height:8px;border-radius:99px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;width:0;background:var(--valencia);border-radius:99px;transition:width .35s linear}
+.prog-meta{display:flex;justify-content:space-between;gap:12px;margin-top:6px;font-size:13px;color:var(--muted)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.review{margin-top:12px;padding:12px;border-radius:8px;background:var(--surface-2);display:grid;gap:10px}
+.review h5{margin:0;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.meters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.meter .top{display:flex;justify-content:space-between;font-size:13px;font-weight:600}
+.meter .track{height:6px;border-radius:99px;background:var(--track);margin-top:4px;overflow:hidden}
+.meter .track span{display:block;height:100%;background:var(--sky);border-radius:99px}
+.review ul{list-style:disc;padding-left:20px;font-size:14px}
+.findings{margin-top:2px;font-size:14px;display:grid;gap:6px}
+
+/* rail */
+.runbox{display:grid;gap:12px}
+.runbox select{margin-top:2px}
+.runlist{display:grid;gap:6px;font-size:14px}
+.runlist li{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
+.runlist li span:first-child{min-width:0}
+.confirm{border:1px solid var(--valencia);border-radius:10px;padding:12px;display:grid;gap:10px;background:color-mix(in srgb,var(--valencia) 8%,var(--surface))}
+.activity ol{display:grid;gap:10px;margin-top:10px}
+.activity li{display:grid;grid-template-columns:48px 1fr;gap:8px;font-size:14px}
+.activity time{font-family:var(--mono);font-size:12px;color:var(--muted);padding-top:2px}
+.skipped{margin-top:4px}
+.skipped li{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.skipped li span{min-width:0;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){.s-run i{animation:none}.bar span{transition:none}.phase-head .chev{transition:none}}
+</style>
+
+<div class="banner" role="note"><span>Mockup with sample data. Nothing on this page runs.</span><button type="button" data-act="reset">Reset demo</button></div>
+
+<div class="wrap">
+  <header class="head">
+    <div>
+      <h1>Research plan</h1>
+      <p class="proj">Project <b>GillianTest</b> &middot; Psychology postgraduate programs</p>
+    </div>
+    <ol class="steps" id="steps" aria-label="Progress"></ol>
+  </header>
+
+  <div class="grid">
+    <section class="panel" id="objective" aria-label="Objective"></section>
+    <section id="plan" aria-label="Plan"></section>
+    <section class="panel runbox" id="runbox" aria-label="Run"></section>
+    <section class="panel activity" id="activity" aria-label="Activity"></section>
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+var PHASES=[
+  {k:1,name:'The Landscape'},{k:2,name:'The Student'},{k:3,name:'Review of Marketing'},
+  {k:4,name:'Product Features'},{k:5,name:'Academic Content'},{k:6,name:'Industry Engagement'},
+  {k:7,name:'Options for OES'}
+];
+var METHOD={web:'Web research',files:'My files'};
+var STATUS={
+  draft:{label:'Needs your approval',cls:'s-needs'},
+  approved:{label:'Approved, waiting for Run',cls:'s-appr'},
+  running:{label:'Running',cls:'s-run'},
+  done:{label:'Finished',cls:'s-done'},
+  followup:{label:'Finished, follow-up suggested',cls:'s-fu'},
+  skipped:{label:'Skipped',cls:'s-skip'}
+};
+var OBJECTIVE='Assess the competitive landscape for online Psychology postgraduate programs in Australia, focusing on Swinburne Online: what is offered, how it is priced and delivered, and where OES partners could differentiate.';
+
+function mkPrompt(q,cover,out){
+  return 'ROLE: Higher-education market analyst working for OES.\n'+
+    'QUESTION: '+q+'\n'+
+    'COVER: '+cover+'.\n'+
+    'SOURCES: Prefer official university and regulator pages. Date every source and flag anything you cannot verify.\n'+
+    'OUTPUT: '+out+' Cite every claim.';
+}
+
+var SEED=[
+  {phase:1,title:'Overview of Swinburne Online Psychology postgraduate programs',focus:['Swinburne Online','Psychology postgraduate programs'],method:'web',
+   why:'Phase 1 has no findings yet. This sets the baseline the other phases build on.',followup:true,
+   prompt:mkPrompt('Which Psychology postgraduate programs does Swinburne Online offer, and how are they structured?',
+     'program names and levels (graduate certificate, graduate diploma, masters); duration and study load; intakes; entry requirements; APAC accreditation and the pathway towards AHPRA registration; indicative fees',
+     'A comparison table of programs, then five short insights for OES.')},
+  {phase:1,title:'Competitive landscape for online Psychology postgraduate programs in Australia',focus:['Online psychology programs','Competitors','Market landscape'],method:'web',
+   why:'The objective asks where OES partners could differentiate, which needs the competitor set first.',
+   prompt:mkPrompt('Which universities offer comparable online Psychology postgraduate programs in Australia?',
+     'program types; pricing; delivery model; accreditation status; how each provider positions itself',
+     'A landscape table of providers, then a short summary of how the market is segmented.')},
+  {phase:2,title:'Target student personas for Psychology postgraduate programs',focus:['Working professionals','Career changers'],method:'web',
+   why:'Phase 2 explains who enrols and why, which the marketing and product phases depend on.',
+   prompt:mkPrompt('Who enrols in online Psychology postgraduate study, and what decides their choice?',
+     'motivations; study barriers such as time, cost and placement requirements; where they research programs',
+     'Three to four personas, each with goals, concerns and the message most likely to move them.')},
+  {phase:3,title:'Swinburne Online Psychology marketing and messaging analysis',focus:['Positioning','Key messages','Calls to action'],method:'web',
+   why:'Marketing is reviewed after the landscape and student phases so it can be judged against them.',
+   prompt:mkPrompt('How does Swinburne Online market its Psychology postgraduate programs?',
+     'positioning statements; key messages on program pages; calls to action; social presence; proof points used',
+     'A messaging matrix and five observations about gaps or strengths.')},
+  {phase:4,title:'Product features and learning experience for Psychology programs',focus:['Delivery mode','Placements','Student support'],method:'web',
+   why:'Product features are compared once the competitor set from Phase 1 is known.',
+   prompt:mkPrompt('What does the online learning experience look like in these programs?',
+     'delivery mode; term structure; placement and practicum arrangements; student support; technology used',
+     'A feature comparison grid and the three biggest differences between providers.')},
+  {phase:5,title:'Academic content and curriculum structure for Psychology programs',focus:['Unit structure','Research component','Practicum hours'],method:'files',
+   why:'Curriculum detail is usually in documents you have uploaded, so this one is set to use your files.',
+   prompt:mkPrompt('How is the curriculum structured, and what is distinctive about it?',
+     'unit structure; core and elective units; research component; practicum hours; assessment types',
+     'A unit map and a short note on academic differentiators.')},
+  {phase:6,title:'Industry engagement and professional outcomes for Psychology graduates',focus:['Employer links','Professional body recognition'],method:'web',
+   why:'Industry engagement closes the evidence set before the options report is drafted.',
+   prompt:mkPrompt('How do these programs connect students to employers and professional pathways?',
+     'employer and placement partners; graduate outcomes; professional body recognition; registration pathways',
+     'A summary of industry links by provider and the strongest outcome claims, with evidence.')}
+];
+var MORE=[
+  {phase:3,title:'Website review of competing online Psychology programs',focus:['Program pages','Enquiry journey'],method:'web',
+   why:'Phase 3 covers more than Swinburne. A website review adds the competitors.',
+   prompt:mkPrompt('How do competing providers present their online Psychology programs on their websites?',
+     'page structure; enquiry and application journey; trust signals; accessibility of fee information',
+     'A side-by-side review with screenshots described in words and a ranked list of strengths.')},
+  {phase:4,title:'Fee structures and payment options across competing programs',focus:['Fees','FEE-HELP','Payment plans'],method:'web',
+   why:'Price is a main decision factor in Phase 2 and has no dedicated research yet.',
+   prompt:mkPrompt('What do competing online Psychology postgraduate programs cost, and how can students pay?',
+     'total and per-unit fees; government loan eligibility; payment plans; scholarships',
+     'A fee table with the date each figure was published.')}
+];
+
+var S=null, timer=null;
+
+function $(sel){return document.querySelector(sel);}
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function clock(){var d=new Date();return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
+function log(text){S.activity.unshift({t:clock(),text:text});S.activity=S.activity.slice(0,14);}
+function phaseName(k){return PHASES.filter(function(p){return p.k===k;})[0].name;}
+function task(id){return S.tasks.filter(function(t){return t.id===id;})[0];}
+
+function icon(name){
+  var d={
+    chev:'<path d="M5 8l5 5 5-5"/>',
+    lock:'<rect x="4" y="9" width="12" height="8" rx="2"/><path d="M7 9V6.5a3 3 0 016 0V9"/>',
+    plus:'<path d="M10 4v12M4 10h12"/>'
+  }[name];
+  return '<svg class="'+(name==='chev'?'chev':'')+'" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+d+'</svg>';
+}
+
+function seed(){
+  if(timer){clearInterval(timer);timer=null;}
+  S={objective:OBJECTIVE,objEdit:false,filter:'all',closedPhases:{},openFind:{},confirming:false,engine:'OpenAI deep research',
+     supBusy:false,supNote:'',moreIndex:0,focusId:null,nextId:1,tasks:[],activity:[]};
+  SEED.forEach(function(s){addTask(s);});
+  log('Supervisor drafted '+SEED.length+' researches from your objective. None can run until you approve them.');
+}
+function addTask(s,extra){
+  var t={id:S.nextId++,phase:s.phase,title:s.title,focus:s.focus.slice(),method:s.method,why:s.why,prompt:s.prompt,seedPrompt:s.prompt,
+         followup:!!s.followup,status:'draft',expanded:false,error:'',progress:0,sources:0,target:0,review:null,from:null};
+  if(extra){for(var k in extra){t[k]=extra[k];}}
+  S.tasks.push(t);
+  return t;
+}
+
+/* ---------- rendering ---------- */
+function counts(){
+  var c={draft:0,approved:0,running:0,finished:0,all:0,skipped:0};
+  S.tasks.forEach(function(t){
+    if(t.status==='skipped'){c.skipped++;return;}
+    c.all++;
+    if(t.status==='draft')c.draft++;
+    else if(t.status==='approved')c.approved++;
+    else if(t.status==='running')c.running++;
+    else c.finished++;
+  });
+  return c;
+}
+function matches(t){
+  var f=S.filter;
+  if(t.status==='skipped')return false;
+  if(f==='all')return true;
+  if(f==='draft')return t.status==='draft';
+  if(f==='approved')return t.status==='approved';
+  if(f==='running')return t.status==='running';
+  if(f==='finished')return t.status==='done'||t.status==='followup';
+  return true;
+}
+
+function renderSteps(){
+  var c=counts();
+  var haveObj=S.objective.trim().length>0;
+  var planned=c.approved+c.running+c.finished>0;
+  var ran=c.running+c.finished>0;
+  var found=c.finished>0;
+  var list=[['Objective',haveObj],['Plan',planned],['Run',ran],['Findings',found]];
+  var nowIdx=list.findIndex(function(x){return !x[1];});
+  if(nowIdx<0)nowIdx=list.length-1;
+  $('#steps').innerHTML=list.map(function(x,i){
+    var cls=x[1]?'done':(i===nowIdx?'now':'');
+    return '<li class="'+cls+'"><span class="n">'+(i+1)+'</span>'+x[0]+'</li>';
+  }).join('');
+}
+
+function renderObjective(){
+  var el=$('#objective');
+  var body;
+  if(S.objEdit){
+    body='<label class="lbl" for="obj-input" style="margin-top:8px">What should this research achieve?</label>'+
+      '<textarea id="obj-input" data-field="objective">'+esc(S.objective)+'</textarea>'+
+      '<div class="obj-actions"><button class="btn primary" type="button" data-act="saveObj">Save objective</button>'+
+      '<button class="btn" type="button" data-act="cancelObj">Cancel</button></div>';
+  }else{
+    body='<p class="obj-text">'+esc(S.objective)+'</p>'+
+      '<div class="obj-actions"><button class="btn" type="button" data-act="editObj">Edit objective</button></div>';
+  }
+  var supBtn=S.supBusy
+    ? '<button class="btn" type="button" disabled>Drafting&hellip;</button>'
+    : '<button class="btn" type="button" data-act="draftMore">Draft next researches</button>';
+  el.innerHTML='<h3>Objective</h3>'+body+
+    '<div class="sup"><p class="small muted"><b style="color:var(--fg)">Supervisor.</b> It reads the objective, drafts researches and reviews finished ones. It never starts research by itself.'+
+    (S.supNote?'<br><span style="color:var(--fg)">'+esc(S.supNote)+'</span>':'')+'</p>'+supBtn+'</div>';
+}
+
+function chip(val,label,n){
+  return '<button type="button" class="chip" data-act="filter" data-val="'+val+'" aria-pressed="'+(S.filter===val)+'">'+label+' <span class="c">'+n+'</span></button>';
+}
+
+function formHtml(t){
+  var id=t.id;
+  return '<div class="form">'+
+    '<div><label for="title-'+id+'">Title</label><input type="text" id="title-'+id+'" data-field="title" data-id="'+id+'" value="'+esc(t.title)+'"></div>'+
+    '<div><span class="lbl">How it runs</span><div class="seg" role="radiogroup" aria-label="How it runs">'+
+      '<label><input type="radio" name="method-'+id+'" value="web" data-field="method" data-id="'+id+'"'+(t.method==='web'?' checked':'')+'> Web research</label>'+
+      '<label><input type="radio" name="method-'+id+'" value="files" data-field="method" data-id="'+id+'"'+(t.method==='files'?' checked':'')+'> My files</label>'+
+    '</div></div>'+
+    '<div><label for="prompt-'+id+'">Research prompt</label><textarea id="prompt-'+id+'" data-field="prompt" data-id="'+id+'" spellcheck="false">'+esc(t.prompt)+'</textarea>'+
+      '<p class="hint" style="margin-top:4px">Drafted from the Phase '+t.phase+' framework. Change anything. This text is exactly what gets sent.</p></div>'+
+    '<div><label for="focus-'+id+'">Focus (separate with commas)</label><input type="text" id="focus-'+id+'" data-field="focus" data-id="'+id+'" value="'+esc(t.focus.join(', '))+'"></div>'+
+    '<p class="hint"><b style="color:var(--fg)">Why the Supervisor proposed this.</b> '+esc(t.why)+'</p>'+
+    (t.error?'<p class="err" role="alert">'+esc(t.error)+'</p>':'')+
+    '<div class="row" style="margin-top:0"><button class="btn primary" type="button" data-act="approve" data-id="'+id+'">Approve</button>'+
+      '<button class="btn" type="button" data-act="redraft" data-id="'+id+'">Re-draft from framework</button>'+
+      '<button class="btn quiet" type="button" data-act="close" data-id="'+id+'">Close</button></div>'+
+  '</div>';
+}
+
+function reviewHtml(t){
+  if(!t.review)return '';
+  var r=t.review;
+  var gaps=r.gaps.length?'<div><h5>Gaps the Supervisor found</h5><ul>'+r.gaps.map(function(g){return '<li>'+esc(g)+'</li>';}).join('')+'</ul></div>':'';
+  var open=!!S.openFind[t.id];
+  return '<div class="review"><h5>Supervisor review</h5>'+
+    '<div class="meters">'+
+      '<div class="meter"><div class="top"><span>Completeness</span><span class="mono">'+r.c.toFixed(2)+'</span></div><div class="track"><span style="width:'+Math.round(r.c*100)+'%"></span></div></div>'+
+      '<div class="meter"><div class="top"><span>Evidence</span><span class="mono">'+r.e.toFixed(2)+'</span></div><div class="track"><span style="width:'+Math.round(r.e*100)+'%"></span></div></div>'+
+    '</div>'+gaps+
+    '<div class="row" style="margin-top:0"><button class="btn" type="button" data-act="findings" data-id="'+t.id+'" aria-expanded="'+open+'">'+(open?'Hide findings':'Read findings')+'</button></div>'+
+    (open?'<div class="findings"><p>Sample summary. The headline findings from the report appear here, written by the research run.</p><p class="muted">'+t.sources+' sources, saved with the report. Each claim links back to its source.</p></div>':'')+
+  '</div>';
+}
+
+function cardHtml(t){
+  var st=STATUS[t.status];
+  var open=t.expanded&&(t.status==='draft'||t.status==='approved');
+  var chips=t.focus.map(function(f){return '<span class="tag">'+esc(f)+'</span>';}).join('');
+  var top='<div class="card-top"><h4>'+esc(t.title)+'</h4><span class="pill '+st.cls+'"><i></i>'+st.label+'</span></div>'+
+    '<div class="meta"><span class="tag method">'+METHOD[t.method]+'</span>'+chips+'</div>';
+  var from=t.from?'<p class="from">Suggested after reviewing &ldquo;'+esc(task(t.from).title)+'&rdquo;.</p>':'';
+  var body='';
+  if(open){
+    body=formHtml(t);
+  }else if(t.status==='draft'){
+    body='<p class="preview">'+esc(t.prompt)+'</p>'+from+
+      '<div class="row"><button class="btn primary" type="button" data-act="edit" data-id="'+t.id+'">Edit and approve</button>'+
+      '<button class="btn quiet" type="button" data-act="skip" data-id="'+t.id+'">Skip</button></div>';
+  }else if(t.status==='approved'){
+    body='<p class="preview">'+esc(t.prompt)+'</p>'+
+      '<div class="row"><button class="btn" type="button" data-act="edit" data-id="'+t.id+'">Edit</button>'+
+      '<button class="btn quiet" type="button" data-act="unapprove" data-id="'+t.id+'">Back to draft</button></div>'+
+      '<p class="hint" style="margin-top:8px">Editing sends it back for approval.</p>';
+  }else if(t.status==='running'){
+    body='<div class="progress"><div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+Math.round(t.progress)+'" aria-label="Progress"><span id="bar-'+t.id+'" style="width:'+t.progress+'%"></span></div>'+
+      '<div class="prog-meta"><span>'+(t.method==='web'?'Searching and reading sources':'Reading your files')+'</span><span class="mono"><span id="src-'+t.id+'">'+t.sources+'</span> found</span></div></div>';
+  }else{
+    body=from+reviewHtml(t);
+  }
+  return '<article class="card'+(open?' open':'')+'" id="card-'+t.id+'">'+top+body+'</article>';
+}
+
+function renderPlan(){
+  var c=counts();
+  var chips='<div class="chips" role="group" aria-label="Filter researches">'+
+    chip('all','All',c.all)+chip('draft','Needs approval',c.draft)+chip('approved','Approved',c.approved)+
+    chip('running','Running',c.running)+chip('finished','Finished',c.finished)+'</div>';
+  var out=chips;
+  PHASES.forEach(function(p){
+    var open=!S.closedPhases[p.k];
+    var all=S.tasks.filter(function(t){return t.phase===p.k&&t.status!=='skipped';});
+    var shown=all.filter(matches);
+    var need=all.filter(function(t){return t.status==='draft';}).length;
+    var sum=p.k===7?'':(all.length?all.length+(all.length===1?' research':' researches')+(need?' &middot; '+need+' need approval':''):'None drafted yet');
+    out+='<div class="phase"><button type="button" class="phase-head" data-act="phase" data-id="'+p.k+'" aria-expanded="'+open+'">'+
+      icon('chev')+'<span class="phase-num">PHASE '+p.k+'</span><span class="phase-name">'+p.name+'</span><span class="phase-sum">'+sum+'</span></button>';
+    if(open){
+      out+='<div class="phase-body">';
+      if(p.k===7){
+        var ready=PHASES.filter(function(q){return q.k<7&&S.tasks.some(function(t){return t.phase===q.k&&t.status==='done';});}).length;
+        out+='<div class="locked">'+icon('lock')+'<div><b>Opens when Phases 1 to 6 each have finished research.</b><br>'+ready+' of 6 are ready. Then the Supervisor can draft the options report for your approval.</div></div>';
+      }else if(!all.length){
+        out+='<div class="empty">No research drafted for this phase yet. Ask the Supervisor to draft some.</div>';
+      }else if(!shown.length){
+        out+='<div class="empty">Nothing here for this filter.</div>';
+      }else{
+        out+=shown.map(cardHtml).join('');
+      }
+      out+='</div>';
+    }
+    out+='</div>';
+  });
+  var skipped=S.tasks.filter(function(t){return t.status==='skipped';});
+  if(skipped.length){
+    out+='<div class="panel skipped"><h3>Skipped ('+skipped.length+')</h3><ul>'+skipped.map(function(t){
+      return '<li><span>'+esc(t.title)+'</span><button type="button" class="btn quiet" data-act="restore" data-id="'+t.id+'">Restore</button></li>';
+    }).join('')+'</ul></div>';
+  }
+  $('#plan').innerHTML=out;
+}
+
+function renderRun(){
+  var approved=S.tasks.filter(function(t){return t.status==='approved';});
+  var running=S.tasks.filter(function(t){return t.status==='running';}).length;
+  var n=approved.length;
+  var list=n?'<ul class="runlist">'+approved.map(function(t){
+    return '<li><span>'+esc(t.title)+'</span><span class="muted small" style="white-space:nowrap">'+METHOD[t.method]+'</span></li>';
+  }).join('')+'</ul>':'<p class="muted small">Approve a research to add it here.</p>';
+  var action;
+  if(S.confirming&&n){
+    action='<div class="confirm" role="group" aria-label="Confirm run"><p><b>Start '+n+(n===1?' research':' researches')+'?</b></p>'+
+      '<p class="small muted">They run in the background on your '+esc(S.engine)+' account, which bills for them. You can leave this page.</p>'+
+      '<div class="row" style="margin-top:0"><button class="btn primary" type="button" data-act="startRun">Start '+n+'</button>'+
+      '<button class="btn" type="button" data-act="cancelRun">Not yet</button></div></div>';
+  }else{
+    action='<button class="btn primary wide" type="button" data-act="openRun"'+(n?'':' disabled')+'>'+(n?'Run '+n+' approved '+(n===1?'research':'researches'):'Nothing approved to run')+'</button>';
+  }
+  $('#runbox').innerHTML='<h3>Run</h3>'+
+    '<p class="small muted">Only approved researches run, and only when you press Run.'+(running?' '+running+' running now.':'')+'</p>'+
+    '<div><label class="lbl" for="engine">Research engine</label><select id="engine" data-field="engine">'+
+      ['OpenAI deep research','Claude web research'].map(function(e){return '<option'+(e===S.engine?' selected':'')+'>'+e+'</option>';}).join('')+
+    '</select></div>'+list+action;
+}
+
+function renderActivity(){
+  $('#activity').innerHTML='<h3>Activity</h3><ol>'+S.activity.map(function(a){
+    return '<li><time>'+a.t+'</time><span>'+esc(a.text)+'</span></li>';
+  }).join('')+'</ol>';
+}
+
+function render(){
+  renderSteps();renderObjective();renderPlan();renderRun();renderActivity();
+  if(S.focusId){var f=document.getElementById(S.focusId);if(f)f.focus();S.focusId=null;}
+}
+
+/* ---------- running ---------- */
+function ensureTimer(){if(!timer)timer=setInterval(tick,400);}
+function tick(){
+  var any=false,finished=false;
+  S.tasks.forEach(function(t){
+    if(t.status!=='running')return;
+    any=true;
+    t.progress=Math.min(100,t.progress+3+(t.id%3));
+    t.sources=Math.round(t.target*t.progress/100);
+    if(t.progress>=100){finish(t);finished=true;}
+  });
+  if(finished){render();}
+  else{
+    S.tasks.forEach(function(t){
+      if(t.status!=='running')return;
+      var b=document.getElementById('bar-'+t.id);if(b)b.style.width=t.progress+'%';
+      var s=document.getElementById('src-'+t.id);if(s)s.textContent=t.sources;
+    });
+  }
+  if(!any){clearInterval(timer);timer=null;}
+}
+function finish(t){
+  t.progress=100;t.sources=t.target;
+  if(t.followup){
+    t.status='followup';
+    t.review={c:0.55,e:0.4,gaps:['Fees and intake dates were not found on an official page.']};
+    var f=addTask({phase:t.phase,title:'Verify fees and intake dates for Swinburne Online Psychology programs',focus:['Fees','Intake dates','Official sources'],method:'web',
+      why:'The review found fees and intake dates without an official source. This closes that gap.',
+      prompt:mkPrompt('What are the current fees and intake dates for each Swinburne Online Psychology postgraduate program?',
+        'fee per unit and total; intake months; the official page each figure comes from; the date it was published',
+        'A table with one row per program and a link to the source for every figure.')},{from:t.id});
+    log('Finished: '+t.title+'. The Supervisor reviewed it and suggested a follow-up. The follow-up needs your approval before it can run.');
+  }else{
+    t.status='done';
+    t.review={c:0.8+((t.id%3)*0.04),e:0.7+((t.id%2)*0.06),gaps:[]};
+    log('Finished: '+t.title+'. The Supervisor reviewed it and found no gaps.');
+  }
+}
+
+/* ---------- actions ---------- */
+function parseFocus(s){return s.split(',').map(function(x){return x.trim();}).filter(Boolean);}
+
+var ACTIONS={
+  reset:function(){seed();render();},
+  editObj:function(){S.objEdit=true;S.focusId='obj-input';render();},
+  cancelObj:function(){S.objEdit=false;render();},
+  saveObj:function(){
+    var v=($('#obj-input').value||'').trim();
+    if(v){S.objective=v;log('You updated the objective. The Supervisor reads it the next time it drafts.');}
+    S.objEdit=false;render();
+  },
+  draftMore:function(){
+    if(S.supBusy)return;
+    S.supBusy=true;S.supNote='';render();
+    setTimeout(function(){
+      var batch=MORE.slice(S.moreIndex,S.moreIndex+2);
+      if(batch.length){
+        batch.forEach(function(m){addTask(m);});
+        S.moreIndex+=batch.length;
+        S.supNote='Drafted '+batch.length+' new '+(batch.length===1?'research':'researches')+'. They are waiting for your approval.';
+        log('Supervisor drafted '+batch.length+' new '+(batch.length===1?'research':'researches')+'. Nothing runs until you approve.');
+      }else{
+        S.supNote='Nothing more to propose until some research has finished.';
+        log('Supervisor looked for gaps and had nothing new to propose yet.');
+      }
+      S.supBusy=false;render();
+    },1100);
+  },
+  filter:function(el){S.filter=el.dataset.val;render();},
+  phase:function(el){var k=el.dataset.id;S.closedPhases[k]=!S.closedPhases[k];render();},
+  edit:function(el){
+    var t=task(+el.dataset.id);
+    if(t.status==='approved'){t.status='draft';log('You reopened "'+t.title+'" for editing. It needs approval again.');}
+    t.expanded=true;t.error='';S.focusId='prompt-'+t.id;render();
+  },
+  close:function(el){task(+el.dataset.id).expanded=false;render();},
+  approve:function(el){
+    var t=task(+el.dataset.id);
+    if(!t.title.trim()){t.error='Add a title before approving.';render();return;}
+    if(t.prompt.trim().length<40){t.error='The research prompt is too short to send. Describe what the research should find out.';render();return;}
+    t.error='';t.expanded=false;t.status='approved';
+    log('You approved "'+t.title+'".');render();
+  },
+  unapprove:function(el){var t=task(+el.dataset.id);t.status='draft';log('You moved "'+t.title+'" back to draft.');render();},
+  skip:function(el){var t=task(+el.dataset.id);t.status='skipped';t.expanded=false;log('You skipped "'+t.title+'".');render();},
+  restore:function(el){var t=task(+el.dataset.id);t.status='draft';log('You restored "'+t.title+'" to the plan.');render();},
+  redraft:function(el){
+    var t=task(+el.dataset.id);t.prompt=t.seedPrompt;t.error='';
+    log('Prompt for "'+t.title+'" re-drafted from the Phase '+t.phase+' framework.');S.focusId='prompt-'+t.id;render();
+  },
+  findings:function(el){var id=+el.dataset.id;S.openFind[id]=!S.openFind[id];render();},
+  openRun:function(){S.confirming=true;render();},
+  cancelRun:function(){S.confirming=false;render();},
+  startRun:function(){
+    var started=0;
+    S.tasks.forEach(function(t){
+      if(t.status==='approved'){t.status='running';t.progress=0;t.sources=0;t.target=9+((t.id*3)%8);started++;}
+    });
+    S.confirming=false;
+    if(started){log('You started '+started+(started===1?' research':' researches')+'.');ensureTimer();}
+    render();
+  }
+};
+
+document.addEventListener('click',function(e){
+  var el=e.target.closest('[data-act]');
+  if(!el||el.disabled)return;
+  var fn=ACTIONS[el.dataset.act];
+  if(fn)fn(el);
+});
+document.addEventListener('input',function(e){
+  var el=e.target;
+  if(!el.dataset||!el.dataset.field)return;
+  var f=el.dataset.field;
+  if(f==='objective')return;
+  if(f==='engine'){S.engine=el.value;return;}
+  var t=task(+el.dataset.id);
+  if(!t)return;
+  if(f==='title')t.title=el.value;
+  else if(f==='prompt')t.prompt=el.value;
+  else if(f==='focus')t.focus=parseFocus(el.value);
+});
+document.addEventListener('change',function(e){
+  var el=e.target;
+  if(!el.dataset||el.dataset.field!=='method')return;
+  var t=task(+el.dataset.id);
+  if(t&&el.checked)t.method=el.value;
+});
+
+seed();render();
+})();
+</script>
