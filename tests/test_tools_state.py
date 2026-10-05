@@ -2,6 +2,7 @@ import pytest
 
 from db.repositories import (
     agent_decisions_repo,
+    evidence_repo,
     projects_repo,
     research_runs_repo,
     research_work_items_repo,
@@ -88,3 +89,16 @@ def test_build_context_reads_the_project_through_the_tool(pid):
     supervisor_service.build_context("P")
     log = tool_calls_repo.list_for_project(pid)[0]
     assert (log["tool"], log["caller"], log["ok"]) == ("get_project_state", "system", 1)
+
+
+def test_project_state_lists_known_facts_per_phase(pid):
+    card4 = research_work_items_repo.create(pid, "4", "Fees")
+    card2 = research_work_items_repo.create(pid, "2", "Students")
+    evidence_repo.get_or_create_fact(pid, "4", card4, "Older fee fact", "older fee fact")
+    evidence_repo.get_or_create_fact(pid, "4", card4, "x" * 400, "x" * 400)
+    gone, _ = evidence_repo.get_or_create_fact(pid, "2", card2, "Rejected", "rejected")
+    evidence_repo.set_fact_status(gone, "rejected")
+    known = tools.run_tool("get_project_state", "system", "P", {}).data["known_facts"]
+    assert set(known) == {"4"}
+    assert known["4"]["count"] == 2
+    assert known["4"]["recent"] == ["x" * 200 + "...[truncated]", "Older fee fact"]

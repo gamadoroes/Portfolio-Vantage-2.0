@@ -1,6 +1,6 @@
 # services/tools/state.py
 """Read-only tools: the project as the Supervisor sees it, and one card in detail."""
-from db.repositories import agent_decisions_repo, research_runs_repo, research_work_items_repo
+from db.repositories import agent_decisions_repo, evidence_repo, research_runs_repo, research_work_items_repo
 
 from .. import insights_service, research_task_service
 from ..phases import PHASE_DEFINITIONS
@@ -12,6 +12,7 @@ from .registry import Tool, register
 from .types import CardId, ToolInput
 
 RECENT_DECISIONS = 10
+KNOWN_FACTS_PER_PHASE, KNOWN_FACT_CHARS = 10, 200
 ALL_CALLERS = frozenset({"supervisor", "user", "system"})
 
 
@@ -59,6 +60,10 @@ def get_project_state(ctx, inputs):
         "cards": cards,
         "phase7": research_task_service.phase7_readiness(ctx.project_id),
         "recent_decisions": decisions,
+        "known_facts": {
+            key: {"count": entry["count"], "recent": [clip_text(claim, KNOWN_FACT_CHARS) for claim in entry["recent"]]}
+            for key, entry in evidence_repo.known_facts(ctx.project_id, per_phase=KNOWN_FACTS_PER_PHASE).items()
+        },
     }
 
 
@@ -81,7 +86,7 @@ def get_task(ctx, inputs):
 register(Tool(
     name="get_project_state",
     description="Read the whole project: objective, phases and their frameworks, every research card "
-                "with its latest run, existing phase findings, Phase 7 readiness and recent decisions.",
+                "with its latest run, existing phase findings, Phase 7 readiness, recent decisions and the facts already known per phase.",
     input_model=ProjectStateInput, handler=get_project_state, callers=ALL_CALLERS,
 ))
 register(Tool(

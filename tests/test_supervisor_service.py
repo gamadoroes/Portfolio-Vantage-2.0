@@ -833,3 +833,56 @@ def test_clean_facts_cuts_to_the_batch_limits():
     cleaned = supervisor_service._clean_facts({"facts": [{"claim": str(i)} for i in range(30)],
                                               "conclusions": [{"text": str(i)} for i in range(5)]})
     assert (len(cleaned["facts"]), len(cleaned["conclusions"])) == (25, 3)
+
+
+# ---- known facts in the drafting briefing ----
+
+def _known(pid, phase, claims):
+    card = research_work_items_repo.create(pid, phase, f"Card {phase}")
+    for claim in claims:
+        evidence_repo.get_or_create_fact(pid, phase, card, claim, claim.lower())
+    return card
+
+
+def _known_section(context):
+    return context.split("# KNOWN FACTS", 1)[1].split("\n# ", 1)[0]
+
+
+def test_drafting_briefing_lists_known_facts_and_not_rejected_ones(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    _known(pid, "4", ["Deakin charges $3,000 per unit"])
+    card = _known(pid, "2", [])
+    gone, _ = evidence_repo.get_or_create_fact(pid, "2", card, "A rejected claim", "a rejected claim")
+    evidence_repo.set_fact_status(gone, "rejected")
+    context = supervisor_service.build_context("P")
+    section = _known_section(context)
+    assert "Phase 4 (Product Features): 1 fact" in section
+    assert "Deakin charges $3,000 per unit" in section
+    assert "A rejected claim" not in context
+    assert context.index("# EXISTING PHASE FINDINGS") < context.index("# KNOWN FACTS") < context.index("# RESEARCH TASKS")
+
+
+def test_no_known_facts_says_so(temp_db):
+    projects_repo.get_or_create_id("P")
+    assert "(no facts recorded yet)" in _known_section(supervisor_service.build_context("P"))
+
+
+def test_known_facts_have_their_own_budget(temp_db):
+    pid = projects_repo.get_or_create_id("P")
+    for phase in "123456":
+        _known(pid, phase, [f"Phase {phase} claim {i} " + "y" * 190 for i in range(12)])
+    context = supervisor_service.build_context("P")
+    section = _known_section(context)
+    assert supervisor_service.MAX_KNOWN_FACTS_CHARS == 4000
+    assert len(section) <= supervisor_service.MAX_KNOWN_FACTS_CHARS + 200
+    assert "(more known facts not shown)" in section
+    assert "# RESEARCH TASKS" in context and "# RECENT SUPERVISOR DECISIONS" in context
+    assert "context truncated" not in context
+
+
+def test_drafting_is_told_to_aim_at_the_gaps():
+    # Assert the new sentence itself, not a word the prompt already contained.
+    assert (
+        "The KNOWN FACTS section lists what earlier research already established for each phase: "
+        "do not propose research to find those facts again; aim at the gaps."
+    ) in supervisor_service.DRAFTING_SYSTEM_PROMPT

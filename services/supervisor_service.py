@@ -25,6 +25,10 @@ from .tools import review as review_tool
 MAX_FOCUS_CHARS = 150
 MAX_RATIONALE_CHARS = 200
 MAX_GAPS_CHARS = 300
+# Known facts get their own budget inside the briefing (not one of the review limits in review_limits.py),
+# so however many facts a project has, they cannot push the rest of the briefing out.
+MAX_KNOWN_FACTS_CHARS = 4000
+KNOWN_FACTS_HEADING = "# KNOWN FACTS (already established by earlier research; do not research these again)"
 
 _clip_run_output = clip_text  # existing call sites keep their name
 
@@ -106,6 +110,25 @@ def _decision_block(decisions, truncated):
     return f"{heading}\n\n" + ("\n".join(lines) if lines else "(no prior decisions)")
 
 
+def _known_facts_block(known, titles):
+    if not known:
+        return f"{KNOWN_FACTS_HEADING}\n\n(no facts recorded yet)"
+    lines = []
+    for key in sorted(known):
+        entry = known[key]
+        noun = "fact" if entry["count"] == 1 else "facts"
+        lines.append(f"- Phase {key} ({titles.get(key, key)}): {entry['count']} {noun}. Most recent:")
+        lines.extend(f"  - {_one_line(claim, 200)}" for claim in entry["recent"])
+    body, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > MAX_KNOWN_FACTS_CHARS:
+            body.append("  (more known facts not shown)")
+            break
+        body.append(line)
+        used += len(line) + 1
+    return f"{KNOWN_FACTS_HEADING}\n\n" + "\n".join(body)
+
+
 def format_briefing(state):
     titles = {p["key"]: p["title"] for p in state["phases"]}
     blocks = [f"# PROJECT OBJECTIVE\n\n{state['objective'] or '(none set)'}"]
@@ -123,6 +146,7 @@ def format_briefing(state):
         "# EXISTING PHASE FINDINGS (read-only; you never modify these directly)\n\n"
         + ("\n".join(phase_lines) if phase_lines else "(no phase findings established yet)")
     )
+    blocks.append(_known_facts_block(state.get("known_facts") or {}, titles))
     item_lines = []
     review_budget = MAX_REVIEW_OUTPUT_TOTAL_CHARS
     for card in state["cards"]:
@@ -157,6 +181,8 @@ DRAFTING_SYSTEM_PROMPT = (
     "added, call no_action. Prefer phases with no research yet. Choose TARGETED_WEB for public "
     "web information and FILE_ANALYSIS when the answer is likely in the project's uploaded files. "
     "Pick the framework that fits each research from the phase's list. Phase 7 is never drafted here."
+    " The KNOWN FACTS section lists what earlier research already established for each phase: do not propose "
+    "research to find those facts again; aim at the gaps."
 )
 
 REVIEW_SYSTEM_PROMPT = (
