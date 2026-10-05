@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
-from services import supervisor_service
+from services import research_execution_service, supervisor_service
 
 
 def _web_task_with_run(pid, title, run_id, response_id="resp_1", run_status="running", output_text=None):
@@ -47,7 +47,7 @@ def _serve(monkeypatch, responses):
             raise answer
         return answer
 
-    monkeypatch.setattr(supervisor_service.openai_service, "retrieve_deep_research", retrieve)
+    monkeypatch.setattr(research_execution_service.openai_service, "retrieve_deep_research", retrieve)
     return looked_up
 
 
@@ -58,7 +58,7 @@ def test_sync_saves_finished_web_research_text_and_sources(temp_db, monkeypatch)
         "completed", "The fee is $40,000.", citation=("Fee schedule", "https://example.com/fees"),
     )})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     run = research_runs_repo.get("run_1")
     assert run["status"] == "completed"
@@ -81,7 +81,7 @@ def test_sync_lists_a_page_cited_many_times_only_once(temp_db, monkeypatch):
         ("Other page", "https://other.example.edu/fees"),
     ])})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     saved = research_runs_repo.get("run_1")["output_text"]
     assert saved.count(page) == 1
@@ -96,7 +96,7 @@ def test_sync_caps_a_very_long_source_list_but_says_how_many_were_left_out(temp_
     many = [(f"Page {i}", f"https://example.edu/page-{i}") for i in range(1, 26)]
     _serve(monkeypatch, {"resp_1": _openai_response("completed", "Body text.", citations=many)})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     saved = research_runs_repo.get("run_1")["output_text"]
     assert "Sources (25)" in saved
@@ -112,7 +112,7 @@ def test_sync_fills_in_text_for_a_run_the_browser_already_marked_completed(temp_
     _web_task_with_run(pid, "Fees", "run_1", run_status="completed", output_text=None)
     _serve(monkeypatch, {"resp_1": _openai_response("completed", "The fee is $40,000.")})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     assert "The fee is $40,000." in research_runs_repo.get("run_1")["output_text"]
 
@@ -123,7 +123,7 @@ def test_sync_leaves_research_that_is_still_running_alone(temp_db, monkeypatch, 
     _web_task_with_run(pid, "Fees", "run_1")
     _serve(monkeypatch, {"resp_1": _openai_response(openai_status)})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     run = research_runs_repo.get("run_1")
     assert run["status"] == "running"
@@ -135,7 +135,7 @@ def test_sync_marks_research_that_failed_as_failed_with_the_reason(temp_db, monk
     _web_task_with_run(pid, "Fees", "run_1")
     _serve(monkeypatch, {"resp_1": _openai_response("failed", error=SimpleNamespace(message="rate limit hit"))})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     run = research_runs_repo.get("run_1")
     assert run["status"] == "failed"
@@ -149,7 +149,7 @@ def test_sync_marks_research_that_finished_without_any_text_as_failed(temp_db, m
     _web_task_with_run(pid, "Fees", "run_1")
     _serve(monkeypatch, {"resp_1": _openai_response("completed", text=None)})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     assert research_runs_repo.get("run_1")["status"] == "failed"
 
@@ -162,7 +162,7 @@ def test_sync_does_not_look_up_runs_that_need_nothing(temp_db, monkeypatch):
     _web_task_with_run(pid, "Already failed", "run_c", response_id="resp_c", run_status="failed")
     looked_up = _serve(monkeypatch, {})
 
-    supervisor_service.sync_web_research_runs("P")
+    research_execution_service.sync_web_research_runs("P")
 
     assert looked_up == []
 
@@ -176,7 +176,7 @@ def test_sync_survives_a_failed_lookup_and_still_syncs_the_other_runs(temp_db, m
         "resp_2": _openai_response("completed", "All good."),
     })
 
-    supervisor_service.sync_web_research_runs("P")  # must not raise
+    research_execution_service.sync_web_research_runs("P")  # must not raise
 
     assert research_runs_repo.get("run_1")["status"] == "running"  # untouched, retried next cycle
     assert "All good." in research_runs_repo.get("run_2")["output_text"]

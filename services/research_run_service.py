@@ -46,6 +46,7 @@ def load_runs(project_name):
             "status": row["status"], "artifact_id": row["artefact_id"],
             "created_at": row["created_at"], "completed_at": row["completed_at"],
             "error": row["error"], "updated_at": row["updated_at"],
+            "research_work_item_id": row["research_work_item_id"],
         }
         for row in research_runs_repo.list_for_project(project_id)
     }

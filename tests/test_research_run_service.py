@@ -119,3 +119,14 @@ def test_update_run_unknown_project_returns_false(temp_db):
     chat_id = _make_chat("P")
     run_id = research_run_service.create_run("P", "resp_1", chat_id, "a prompt")
     assert research_run_service.update_run("NoSuchProject", run_id, status="completed") is False
+
+
+def test_load_runs_includes_the_linked_work_item(temp_db, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from db.repositories import projects_repo, research_work_items_repo
+    from services import research_run_service
+    pid = projects_repo.get_or_create_id("P")
+    card_id = research_work_items_repo.create(pid, "4", "Card")
+    run_id = research_run_service.create_run("P", "resp_1", None, "prompt")
+    research_run_service.update_run("P", run_id, research_work_item_id=card_id)
+    assert research_run_service.load_runs("P")[run_id]["research_work_item_id"] == card_id

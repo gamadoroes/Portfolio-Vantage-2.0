@@ -8,21 +8,21 @@ from flask import current_app
 from db.repositories import agent_decisions_repo, projects_repo, research_runs_repo, research_work_items_repo
 
 from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
-from .deep_research_output import extract_deep_research_output
-from .file_index_service import HIDDEN_SOURCE_FILES, reconcile_file_index, reconcile_selected_file_ids
-from .file_service import load_project_files
 from .phases import PHASE_DEFINITIONS
 from .project_service import load_project_prompt
+from .research_execution_service import (
+    MAX_FILE_ANALYSIS_PER_FILE_CHARS,
+    MAX_FILE_ANALYSIS_TOTAL_CHARS,
+    _selected_project_files,
+    sync_web_research_runs,
+)
 
 MAX_CONTEXT_CHARS = 60000
-MAX_FILE_ANALYSIS_TOTAL_CHARS = 60000
-MAX_FILE_ANALYSIS_PER_FILE_CHARS = 15000
 # A task awaiting review needs enough of its run output for the supervisor to
 # score completeness/evidence; every other task only needs a short reminder.
 MAX_RUN_OUTPUT_PREVIEW_CHARS = 300
 MAX_RUN_OUTPUT_REVIEW_CHARS = 8000
 MAX_REVIEW_OUTPUT_TOTAL_CHARS = 24000
-MAX_WEB_SOURCES_LISTED = 20
 
 
 def _clip_run_output(text, limit):
@@ -363,19 +363,6 @@ TOOL_HANDLERS["propose_tasks"] = handle_propose_tasks
 TOOL_HANDLERS["create_followup_task"] = handle_create_followup_task
 
 
-def _selected_project_files(project_name):
-    all_files = {
-        k: v for k, v in load_project_files(project_name).items()
-        if k not in HIDDEN_SOURCE_FILES
-    }
-    index_entries = reconcile_file_index(project_name)
-    selection_state = reconcile_selected_file_ids(project_name, index_entries)
-    selected_files = selection_state.get("selected_files", [])
-    if selected_files:
-        return {k: v for k, v in all_files.items() if k in set(selected_files)}
-    return all_files
-
-
 def _build_file_analysis_prompt(task_row, files):
     objective = task_row["objective"] or task_row["title"]
     entities = json.loads(task_row["entities_json"]) if task_row["entities_json"] else []
@@ -540,90 +527,6 @@ SUPERVISOR_SYSTEM_PROMPT = (
     "review or create follow-up tasks when evidence is weak. Only trigger "
     "final synthesis once every phase has real completed research."
 )
-
-
-def _needs_web_sync(run):
-    # Only web runs have a response_id (file analysis does not). The browser poller can
-    # flip a run to "completed" without ever saving its text, so "no text yet" counts
-    # as pending too, not just "running".
-    return (
-        run is not None
-        and bool(run["response_id"])
-        and not run["output_text"]
-        and run["status"] in ("running", "completed")
-    )
-
-
-def _web_research_error(response):
-    for attr in ("error", "last_error"):
-        err = getattr(response, attr, None)
-        if not err:
-            continue
-        if isinstance(err, dict):
-            return err.get("message") or str(err)
-        if isinstance(err, str):
-            return err
-        return getattr(err, "message", None) or str(err)
-    return None
-
-
-def _format_web_research_output(text, citations):
-    # Sources go first, because build_context clips from the end and the supervisor needs
-    # them to judge how well-evidenced the findings are. Real reports cite one page dozens
-    # of times with different "#:~:text=" fragments, so list each page once and cap the
-    # list; otherwise it would fill the supervisor's whole view of the report.
-    sources = {}
-    for c in citations:
-        if c["type"] == "url":
-            page = c["url"].split("#")[0]
-            sources.setdefault(page, f"{c['title']} - {page}")
-        else:
-            sources.setdefault(c["filename"], c["filename"])
-    if not sources:
-        return text
-
-    listed = list(sources.values())[:MAX_WEB_SOURCES_LISTED]
-    lines = [f"- {source}" for source in listed]
-    if len(sources) > len(listed):
-        lines.append(f"(+{len(sources) - len(listed)} more)")
-    return f"Sources ({len(sources)}):\n" + "\n".join(lines) + "\n\n" + text
-
-
-def sync_web_research_runs(project_name):
-    """Pull the outcome of TARGETED_WEB runs from OpenAI into research_runs.
-
-    Done by the supervisor itself on every cycle, so web research completes and becomes
-    reviewable without a browser tab open (the browser poller only ever saves a status).
-    """
-    project_id = projects_repo.get_or_create_id(project_name)
-    for item in research_work_items_repo.list_for_project(project_id):
-        run = research_runs_repo.find_latest_for_work_item(item["id"])
-        if not _needs_web_sync(run):
-            continue
-        try:
-            response = openai_service.retrieve_deep_research(run["response_id"])
-        except Exception as exc:  # one flaky lookup must not block the whole cycle
-            print(f"[supervisor] could not check web research run {run['id']}: {exc}")
-            continue
-
-        status = getattr(response, "status", None)
-        if status == "completed":
-            text, _markdown, citations = extract_deep_research_output(response)
-            if text:
-                research_run_service.update_run(
-                    project_name, run["id"], status="completed",
-                    output_text=_format_web_research_output(text, citations),
-                    completed_at=datetime.now().isoformat(),
-                )
-            else:
-                research_run_service.fail_run(
-                    project_name, run["id"], "OpenAI reported the research finished but returned no text"
-                )
-        elif status in ("failed", "incomplete", "cancelled"):
-            research_run_service.fail_run(
-                project_name, run["id"], _web_research_error(response) or f"OpenAI reported status: {status}"
-            )
-        # queued / in_progress: still working; checked again next cycle.
 
 
 def run_supervisor_cycle(project_name):

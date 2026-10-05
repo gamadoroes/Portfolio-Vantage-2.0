@@ -22,7 +22,7 @@ Where the limits live (`services/supervisor_service.py`):
 - `MAX_RUN_OUTPUT_REVIEW_CHARS` = 8000 (per task awaiting review)
 - `MAX_REVIEW_OUTPUT_TOTAL_CHARS` = 24000 (all tasks awaiting review, per cycle)
 - `MAX_CONTEXT_CHARS` = 60000 (whole context)
-- `MAX_WEB_SOURCES_LISTED` = 20
+- `MAX_WEB_SOURCES_LISTED` = 20 (now in `services/research_execution_service.py`, value unchanged)
 
 ### Planned test (in this order)
 
