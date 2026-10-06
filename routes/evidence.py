@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 
+from db.repositories import projects_repo
 from routes.board import _no_project, _request_project
 from services import evidence_service, tools
 from services.phases import PHASE_DEFINITIONS
@@ -8,13 +9,14 @@ evidence_bp = Blueprint("evidence", __name__)
 KINDS = ("fact", "conclusion")
 STATUS_ACTIONS = ("reject", "restore")
 SEARCH_CHARS = 200
+CHOOSE_A_PHASE = "Choose a phase from 1 to 7."
 
 
 def _phase_filter():
     """The optional ?phase= as (phase or None, error response or None)."""
     phase = (request.args.get("phase") or "").strip() or None
     if phase is not None and phase not in PHASE_DEFINITIONS:
-        return None, (jsonify({"success": False, "error": "Choose a phase from 1 to 7."}), 400)
+        return None, (jsonify({"success": False, "error": CHOOSE_A_PHASE}), 400)
     return phase, None
 
 
@@ -47,6 +49,20 @@ def search_evidence():
     if phase is not None:
         inputs["phase_key"] = phase
     return _tool_response(tools.run_tool("search_existing_evidence", "user", project, inputs))
+
+
+@evidence_bp.route("/api/evidence/brief", methods=["GET"])
+def phase_brief():
+    """The facts briefing Generate adds to a phase's prompt (spec section 3)."""
+    project, _ = _request_project()
+    if not project:
+        return _no_project()
+    phase, bad_phase = _phase_filter()
+    if bad_phase:
+        return bad_phase
+    if phase is None:
+        return jsonify({"success": False, "error": CHOOSE_A_PHASE}), 400
+    return jsonify({"success": True, "brief": evidence_service.phase_brief(projects_repo.get_id(project), phase)})
 
 
 @evidence_bp.route("/api/evidence/<kind>/<int:item_id>/<action>", methods=["POST"])

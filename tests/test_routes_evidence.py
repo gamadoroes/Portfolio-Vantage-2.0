@@ -163,3 +163,47 @@ def test_facts_are_not_drawn_under_a_past_insights_version():
     # is only written when the tab is not showing a frozen history entry (facts are not versioned).
     source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     assert re.search(r"\$\{viewingHistoricalVersion \? '' : `<div class=\"ev-slot\" data-evidence-phase=", source)
+
+
+# ---- the facts briefing for Generate ----
+
+def test_the_brief_for_a_phase(client):
+    _, data = _seed()
+    first, second = data["fact_ids"]
+    body = client.get("/api/evidence/brief?project=P&phase=4").get_json()
+    assert body["success"] is True
+    brief = body["brief"]
+    assert (brief["fact_count"], brief["conclusion_count"], brief["shown_facts"]) == (2, 1, 2)
+    assert brief["rejected_count"] == 0
+    assert brief["text"].startswith("# CHECKED FACTS FOR PHASE 4 (newest first)\n"
+                                    f"[F{second}] Monash runs three intakes\n"
+                                    f"[F{first}] Deakin charges $3,000 per unit — Deakin fees, as of 2026\n")
+    assert client.get("/api/evidence/brief?project=P&phase=2").get_json()["brief"]["fact_count"] == 0
+
+
+def test_the_brief_reports_how_many_facts_are_rejected(client):
+    _, data = _seed()
+    first, _second = data["fact_ids"]
+    client.post(f"/api/evidence/fact/{first}/reject", json={"project": "P"})
+    brief = client.get("/api/evidence/brief?project=P&phase=4").get_json()["brief"]
+    assert (brief["fact_count"], brief["rejected_count"]) == (1, 1)
+    assert "# REJECTED — DO NOT USE\n- Deakin charges $3,000 per unit\n" in brief["text"]
+    assert client.get("/api/evidence/brief?project=P&phase=2").get_json()["brief"]["rejected_count"] == 0
+
+
+@pytest.mark.parametrize("query", ["", "&phase=", "&phase=9", "&phase=x"])
+def test_the_brief_needs_a_phase_from_1_to_7(client, query):
+    resp = client.get(f"/api/evidence/brief?project=P{query}")
+    assert resp.status_code == 400
+    assert resp.get_json() == {"success": False, "error": "Choose a phase from 1 to 7."}
+
+
+def test_the_brief_with_no_project_is_400(client):
+    resp = client.get("/api/evidence/brief?project=Nope&phase=4")
+    assert resp.status_code == 400 and resp.get_json() == {"success": False, "error": "No project selected."}
+
+
+def test_the_brief_never_includes_another_projects_facts(client):
+    _other_project(client)
+    text = client.get("/api/evidence/brief?project=P&phase=4").get_json()["brief"]["text"]
+    assert "Deakin" in text and "Torrens" not in text and "Federation" not in text
