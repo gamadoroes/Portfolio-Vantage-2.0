@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from db.repositories import evidence_repo, projects_repo, research_work_items_repo
@@ -52,6 +54,8 @@ def test_the_rules_say_how_to_cite(pid):
     assert rules.startswith("RULES:")
     for words in ("[F#]", "[C#]", "(not fact-checked)", "Never use a fact listed under REJECTED", "exactly as written"):
         assert words in rules
+    # No real-looking ids: a model that echoes the example must not cite facts that do not exist.
+    assert not re.search(r"\[[FC]\d", rules)
 
 
 def test_a_phase_with_nothing_says_none_in_every_section(pid):
@@ -189,3 +193,75 @@ def test_a_phase_with_only_rejected_facts_still_lists_them_as_not_to_use(pid):
     assert sections[0] == "# CHECKED FACTS FOR PHASE 1 (newest first)\n(none)"
     assert sections[2].split("\n") == ["# REJECTED — DO NOT USE", "- First wrong claim", "- Second wrong claim"]
     assert brief["text"].endswith(evidence_service.BRIEF_RULES)
+
+
+# ---- the Sources list ----
+
+def test_markers_are_read_once_each_in_order_of_first_appearance():
+    text = "A [F26] [F28] [F4]. B [C3] and [F26] again. [f5], [F], [X1] and F7 are not markers. [F007] is fact 7."
+    assert evidence_service.cited_markers(text) == [("F", 26), ("F", 28), ("F", 4), ("C", 3), ("F", 7)]
+    assert evidence_service.cited_markers("No markers here.") == []
+    assert evidence_service.cited_markers(None) == []
+
+
+def test_the_index_holds_every_fact_and_conclusion_of_the_project_whatever_its_status(pid):
+    card = _card(pid)
+    kept, gone = _fact(pid, card, "Kept"), _fact(pid, card, "Gone")
+    evidence_repo.set_fact_status(gone, "rejected")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "Both", [kept, gone])
+    other = projects_repo.get_or_create_id("Other")
+    theirs = _fact(other, _card(other), "Theirs")
+    index = evidence_service.citation_index("P")
+    assert set(index["facts"]) == {kept, gone} and theirs not in index["facts"]
+    assert index["facts"][gone]["status"] == "rejected"
+    assert index["conclusions"] == {conclusion: {"id": conclusion, "text": "Both", "status": "active",
+                                                 "fact_ids": [kept, gone]}}
+    assert evidence_service.citation_index("Nope") == {"facts": {}, "conclusions": {}}
+    assert evidence_service.citation_index(None) == {"facts": {}, "conclusions": {}}
+
+
+def test_each_cited_item_gets_one_sources_line_in_order_of_first_appearance(pid):
+    card = _card(pid)
+    full = _fact(pid, card, "Fees", source=("https://deakin.example/fees", "Deakin fees", "Deakin University"),
+                 as_of="2026")
+    bare = _fact(pid, card, "No page", as_of="2025")
+    titled = _fact(pid, card, "Titled", source=("https://b.example", "Page B", None))
+    gone = _fact(pid, card, "Gone", source=("https://c.example", "Page C", "Uni C"))
+    evidence_repo.set_fact_status(gone, "rejected")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "x" * 250, [full, bare])
+    other = projects_repo.get_or_create_id("Other")
+    theirs = _fact(other, _card(other), "Theirs")
+    text = (f"[F{full}] a [C{conclusion}] b [F{bare}] [F{full}] [F{titled}] [F{gone}] [F99999] [F{theirs}] "
+            "[C88888]")
+    assert evidence_service.sources_lines(text, evidence_service.citation_index("P")) == [
+        f"F{full} — Deakin University — Deakin fees (2026) — https://deakin.example/fees",
+        f"C{conclusion} — Conclusion: {'x' * 199}… (based on F{full}, F{bare})",
+        f"F{bare} — Research report: Landscape (2025)",
+        f"F{titled} — Page B — https://b.example",
+        f"F{gone} — Uni C — Page C — https://c.example (since rejected)",
+        "F99999 — (not found)",
+        f"F{theirs} — (not found)",
+        "C88888 — (not found)",
+    ]
+
+
+def test_a_rejected_conclusion_says_so(pid):
+    card = _card(pid)
+    fact = _fact(pid, card, "A fact")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "Short\nconclusion", [fact])
+    evidence_repo.set_conclusion_status(conclusion, "rejected")
+    assert evidence_service.sources_lines(f"[C{conclusion}]", evidence_service.citation_index("P")) == [
+        f"C{conclusion} — Conclusion: Short conclusion (based on F{fact}) (since rejected)"]
+
+
+def test_no_markers_means_no_sources(pid):
+    index = evidence_service.citation_index("P")
+    assert evidence_service.sources_lines("Plain text.", index) == []
+    assert evidence_service.sources_markdown("Plain text.", index) == ""
+    assert evidence_service.sources_lines("[F1]", None) == ["F1 — (not found)"]
+
+
+def test_the_sources_list_as_markdown(pid):
+    fact = _fact(pid, _card(pid), "Fees", source=("https://a.example", "Page A", None))
+    assert evidence_service.sources_markdown(f"Dear [F{fact}].", evidence_service.citation_index("P")) == (
+        f"\n\n## Sources\n\n- F{fact} — Page A — https://a.example")

@@ -1,6 +1,8 @@
 # services/evidence_service.py
 """Facts and conclusions as the screens and tools show them. All SQL is in db/repositories/evidence_repo.py."""
 
+import re
+
 from db.repositories import evidence_repo, projects_repo
 
 # The facts briefing each phase's Generate gets (spec section 3): about 3,000 tokens at most.
@@ -11,11 +13,15 @@ REJECTED_HEADING = "# REJECTED — DO NOT USE"
 BRIEF_RULES = (
     "RULES:\n"
     "- Cite every factual claim with the marker of the fact or conclusion it rests on: [F#] for a fact, "
-    "[C#] for a conclusion. Several may sit together, e.g. [F26] [F28].\n"
+    "[C#] for a conclusion. Several may sit together, e.g. [F#] [F#].\n"
     "- Mark anything taken only from the attached reports, and not from these facts, \"(not fact-checked)\".\n"
     "- Never use a fact listed under REJECTED — DO NOT USE.\n"
     "- Keep every marker exactly as written: square brackets, the letter and the number."
 )
+
+# [F12] cites fact 12, [C3] conclusion 3 (spec section 2).
+MARKER_RE = re.compile(r"\[([FC])(\d+)\]")
+SOURCE_CONCLUSION_CHARS = 200
 
 
 def fact_dict(row):
@@ -124,3 +130,81 @@ def phase_brief(project_id, phase_key):
     ])
     return {"text": text, "fact_count": len(active), "conclusion_count": len(conclusions), "shown_facts": shown,
             "rejected_count": len(rejected)}
+
+
+def cited_markers(text):
+    """The [F#] / [C#] markers in a write-up as (kind, id) pairs, each once, in order of first appearance."""
+    seen, found = set(), []
+    for kind, digits in MARKER_RE.findall(text if isinstance(text, str) else ""):
+        key = (kind, int(digits))
+        if key not in seen:
+            seen.add(key)
+            found.append(key)
+    return found
+
+
+def citation_index(project_name):
+    """Every fact and conclusion of the project by id, whatever its status: what a Sources list looks markers up
+    in. An unknown project (or none) has nothing, so every marker in its text reads "(not found)"."""
+    project_id = projects_repo.get_id(project_name) if project_name else None
+    if project_id is None:
+        return {"facts": {}, "conclusions": {}}
+    links = evidence_repo.conclusion_fact_links(project_id)
+    return {
+        "facts": {row["id"]: fact_dict(row) for row in evidence_repo.list_facts(project_id)},
+        "conclusions": {
+            row["id"]: {"id": row["id"], "text": row["text"], "status": row["status"],
+                        "fact_ids": [fact_id for fact_id, _ in links.get(row["id"], [])]}
+            for row in evidence_repo.list_conclusions(project_id)
+        },
+    }
+
+
+def _clip(text, limit):
+    flat = _flat(text)
+    return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
+
+
+def _fact_source_line(fact_id, fact):
+    if fact is None:
+        return f"F{fact_id} — (not found)"
+    source = fact["source"] or {}
+    title, publisher, card = _flat(source.get("title")), _flat(source.get("publisher")), _flat(fact["card_title"])
+    parts = [f"F{fact_id}", publisher or title or (f"Research report: {card}" if card else "Research report")]
+    if publisher and title:
+        parts.append(title)
+    if fact["as_of"]:
+        parts[-1] += f" ({_flat(fact['as_of'])})"
+    if source.get("url"):
+        parts.append(_flat(source["url"]))
+    line = " — ".join(parts)
+    return f"{line} (since rejected)" if fact["status"] == "rejected" else line
+
+
+def _conclusion_source_line(conclusion_id, conclusion):
+    if conclusion is None:
+        return f"C{conclusion_id} — (not found)"
+    line = f"C{conclusion_id} — Conclusion: {_clip(conclusion['text'], SOURCE_CONCLUSION_CHARS)}"
+    if conclusion["fact_ids"]:
+        line += f" (based on {', '.join(f'F{fact_id}' for fact_id in conclusion['fact_ids'])})"
+    return f"{line} (since rejected)" if conclusion["status"] == "rejected" else line
+
+
+def sources_lines(text, index):
+    """The Sources list for a write-up (spec section 6): one line per distinct cited fact or conclusion, in order of
+    first appearance. `index` is citation_index(project); None counts as a project with nothing."""
+    index = index or {}
+    facts, conclusions = index.get("facts", {}), index.get("conclusions", {})
+    return [
+        _fact_source_line(item_id, facts.get(item_id)) if kind == "F"
+        else _conclusion_source_line(item_id, conclusions.get(item_id))
+        for kind, item_id in cited_markers(text)
+    ]
+
+
+def sources_markdown(text, index):
+    """The same Sources list as a Markdown section to append to a saved report, or "" when nothing is cited."""
+    lines = sources_lines(text, index)
+    if not lines:
+        return ""
+    return "\n\n## Sources\n\n" + "\n".join(f"- {line}" for line in lines)
