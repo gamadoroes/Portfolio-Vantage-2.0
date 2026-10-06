@@ -24,6 +24,10 @@ BRIEF_RULES = (
 MARKER_RE = re.compile(r"\[([FC])([0-9]{1,9})\]")
 SOURCE_CONCLUSION_CHARS = 200
 NOT_CITED_NOTE = "Not fact-cited — written from the reports only."
+KEEP_MARKERS_INSTRUCTION = (
+    "Keep the [F#] and [C#] citation markers from the phase write-ups exactly as written, "
+    "next to each point you take from them."
+)
 
 
 def fact_dict(row):

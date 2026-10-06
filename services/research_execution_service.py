@@ -12,7 +12,14 @@ from flask import current_app
 
 from db.repositories import projects_repo, research_runs_repo, research_work_items_repo, sources_repo
 
-from . import insights_service, llm_service, openai_service, research_run_service, research_task_service
+from . import (
+    evidence_service,
+    insights_service,
+    llm_service,
+    openai_service,
+    research_run_service,
+    research_task_service,
+)
 from .deep_research_output import extract_deep_research_output
 from .file_index_service import HIDDEN_SOURCE_FILES, ensure_file_id, reconcile_file_index, reconcile_selected_file_ids
 from .file_service import load_project_files, save_project_file
@@ -44,7 +51,8 @@ SYNTHESIS_SYSTEM_PROMPT = (
     "You are a senior strategy consultant synthesising a competitive "
     "landscape analysis for Australian higher education. Using ONLY the "
     "phase summaries provided, identify the key strategic options available. "
-    "Use the SO WHAT / NOW WHAT framework. Write in Australian English."
+    "Use the SO WHAT / NOW WHAT framework. Write in Australian English. "
+    + evidence_service.KEEP_MARKERS_INSTRUCTION
 )
 
 
@@ -145,6 +153,16 @@ def run_file_analysis(project_name, card_id, run_id):
         research_run_service.fail_run(project_name, run_id, str(exc))
 
 
+def _options_sources(project_name, text):
+    """The options report's Sources list as Markdown, or "" when it cites nothing. A failed lookup adds nothing:
+    the report itself must never be lost to its list."""
+    try:
+        return evidence_service.sources_markdown(text, evidence_service.citation_index(project_name))
+    except Exception as exc:
+        print(f"[board] could not list the sources of the options report: {exc}")
+        return ""
+
+
 def run_synthesis(project_name, card_id, run_id):
     """Background worker for the Phase 7 options report. Writes Insights Phase 7 and completes the card."""
     try:
@@ -162,6 +180,9 @@ def run_synthesis(project_name, card_id, run_id):
             + ("\n\n".join(summaries) if summaries else "(no phase summaries available)")
         )
         text = llm_service.prompt_completion(SYNTHESIS_SYSTEM_PROMPT, user_message, max_tokens=SYNTHESIS_MAX_TOKENS)
+        # The saved report gets its own Sources list so it stands alone (spec section 7). Insights Phase 7 keeps
+        # the plain text: its card links the markers and the Word report adds the list itself.
+        report = text + _options_sources(project_name, text)
 
         # Re-load: the Claude call is slow, and a report link or a phase refresh saved
         # meanwhile must not be reverted. Only Phase 7's summary and confidence change.
@@ -179,7 +200,7 @@ def run_synthesis(project_name, card_id, run_id):
             "phases": phases,
         })
         research_run_service.update_run(
-            project_name, run_id, status="completed", output_text=text, completed_at=datetime.now().isoformat(),
+            project_name, run_id, status="completed", output_text=report, completed_at=datetime.now().isoformat(),
         )
         research_task_service.transition_task(card_id, "COMPLETE")
     except Exception as exc:

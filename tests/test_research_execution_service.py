@@ -1,9 +1,10 @@
+import re
 from types import SimpleNamespace
 
 import pytest
 
-from db.repositories import projects_repo, research_runs_repo, research_work_items_repo
-from services import insights_service, llm_service, research_execution_service, research_task_service
+from db.repositories import evidence_repo, projects_repo, research_runs_repo, research_work_items_repo
+from services import evidence_service, insights_service, llm_service, research_execution_service, research_task_service
 
 PROMPT = "Research the fee structures of every online Psychology postgraduate program in Australia."
 
@@ -188,3 +189,62 @@ def test_synthesis_keeps_insights_changes_made_while_it_was_writing(pid, monkeyp
     assert current["phases"]["3"]["summary"] == "Refreshed summary 3"
     assert current["phases"]["4"]["linked_file_ids"] == [stable_id]
     assert current["generated_at"] == "2026-10-03T00:00:00"
+
+
+def _cited_phases(pid):
+    """Phases 1-6 finished, a fact saved for Phase 4, and every phase write-up citing it. Returns the fact id."""
+    _complete_phases_1_to_6(pid)
+    card = research_work_items_repo.create(pid, "4", "Fees research")
+    source, _ = evidence_repo.get_or_create_source(pid, "https://deakin.example/fees", "Deakin fees",
+                                                   publisher="Deakin University")
+    fact, _ = evidence_repo.get_or_create_fact(pid, "4", card, "Deakin charges $3,000", "deakin charges $3,000",
+                                               cited_source_id=source, as_of="2026")
+    insights_service.save_insights("P", {
+        "generated_at": "2026-10-01T00:00:00", "competitors": [], "competitor_landscape_markdown": "",
+        "phases": {str(i): {"title": f"Phase {i}", "summary": f"Summary {i} [F{fact}]", "confidence": "high",
+                             "evidence_sources": [], "gaps": [], "suggested_topics": [],
+                             "linked_files": [], "linked_file_ids": []} for i in range(1, 8)},
+    })
+    return fact
+
+
+def test_the_marker_instruction_uses_a_placeholder_not_a_real_looking_id():
+    instruction = evidence_service.KEEP_MARKERS_INSTRUCTION
+    assert "[F#]" in instruction and "[C#]" in instruction
+    assert not re.search(r"\[[FC][0-9]", instruction)
+
+
+def test_the_options_report_keeps_the_markers_and_its_saved_report_ends_with_its_sources(pid, monkeypatch):
+    fact = _cited_phases(pid)
+    seen = {}
+
+    def fake_claude(system, user, max_tokens=4000):
+        seen["system"], seen["user"] = system, user
+        return f"Option A is cheap [F{fact}]."
+
+    monkeypatch.setattr(llm_service, "prompt_completion", fake_claude)
+    card_id = _ready_card(pid, method="SYNTHESIS", phase="7", title="Options report")
+    research_execution_service.start_runs("P", [card_id])
+    assert evidence_service.KEEP_MARKERS_INSTRUCTION in seen["system"]
+    assert f"Summary 4 [F{fact}]" in seen["user"]
+    assert research_runs_repo.find_latest_for_work_item(card_id)["output_text"] == (
+        f"Option A is cheap [F{fact}].\n\n## Sources\n\n"
+        f"- F{fact} — Deakin University — Deakin fees (2026) — https://deakin.example/fees")
+    # Insights Phase 7 keeps the plain text: its card links the markers, and the Word report adds its own list.
+    assert insights_service.load_current_insights("P")["phases"]["7"]["summary"] == f"Option A is cheap [F{fact}]."
+    assert research_work_items_repo.get(card_id)["status"] == "COMPLETE"
+
+
+def test_a_failed_sources_lookup_still_saves_the_options_report(pid, monkeypatch):
+    fact = _cited_phases(pid)
+
+    def broken(project_name):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(evidence_service, "citation_index", broken)
+    monkeypatch.setattr(llm_service, "prompt_completion",
+                        lambda system, user, max_tokens=4000: f"Option A [F{fact}].")
+    card_id = _ready_card(pid, method="SYNTHESIS", phase="7", title="Options report")
+    research_execution_service.start_runs("P", [card_id])
+    assert research_runs_repo.find_latest_for_work_item(card_id)["output_text"] == f"Option A [F{fact}]."
+    assert research_work_items_repo.get(card_id)["status"] == "COMPLETE"
