@@ -73,6 +73,7 @@
     }
     function conclusionNode(doc, conclusion) {
         const item = el(doc, 'li', conclusion.status === 'rejected' ? 'ev-concl rejected' : 'ev-concl');
+        item.setAttribute('id', `ev-concl-${Number(conclusion.id)}`);  // the target of a [C#] marker on a phase card
         item.appendChild(el(doc, 'p', 'ev-text', conclusion.text));
         const meta = el(doc, 'div', 'ev-meta');
         meta.appendChild(basedOnNode(doc, conclusion));
@@ -178,6 +179,110 @@
         }
     }
 
+    // ---- Citation markers on the phase cards (spec section 5) ----
+    const NOT_CITED_NOTE = 'Not fact-cited — written from the reports only.';
+
+    // A marker is [F<id>] or [C<id>] with one to nine ASCII digits: the same rule as MARKER_RE in
+    // services/evidence_service.py, so the card links and the Word report's Sources list always agree.
+    function hasCitationMarkers(text) { return typeof text === 'string' && /\[([FC])([0-9]{1,9})\]/.test(text); }
+    // The note a phase card shows above a write-up that cites no facts ('' when it needs none).
+    function notCitedNote(summary) {
+        const text = typeof summary === 'string' ? summary.trim() : '';
+        return text && text !== 'MISSING' && !hasCitationMarkers(text) ? NOT_CITED_NOTE : '';
+    }
+    // {F: {id: status}, C: {id: status}} for every fact and conclusion of the project, from the same /api/evidence
+    // answer that fills the phase slots. A phase card may cite another phase's facts (Phase 7 does).
+    function citationIndex(phases) {
+        const index = { F: Object.create(null), C: Object.create(null) };
+        Object.keys(phases || {}).forEach(key => {
+            const phase = phases[key] || {};
+            (phase.facts || []).forEach(f => { index.F[Number(f.id)] = f.status; });
+            (phase.conclusions || []).forEach(c => { index.C[Number(c.id)] = c.status; });
+        });
+        return index;
+    }
+    const citeHref = (kind, id) => `#${kind === 'F' ? 'ev-fact' : 'ev-concl'}-${id}`;
+    function setCiteState(link, status) {
+        if (status === 'rejected') {
+            link.className = 'ev-cite rejected';
+            link.setAttribute('title', 'Rejected');
+        } else {
+            link.className = 'ev-cite';
+            link.removeAttribute('title');
+        }
+    }
+    function citeLink(doc, kind, id, label, status) {
+        const link = el(doc, 'a', null, label);
+        link.setAttribute('href', citeHref(kind, id));
+        link.setAttribute('data-cite', `${kind}${id}`);
+        setCiteState(link, status);
+        return link;
+    }
+    // Whether an <a> is a citation link of ours: its data-cite names a marker and its href is exactly that marker's
+    // in-page anchor. Any other link (say an outside one that came with a data-cite attribute, which the sanitiser
+    // keeps) is not a citation and is never restyled or treated as one. Returns {kind, id} or null.
+    function ownCitation(node) {
+        const cite = /^([FC])([0-9]{1,9})$/.exec(node.getAttribute('data-cite') || '');
+        if (!cite) return null;
+        const kind = cite[1];
+        const id = Number(cite[2]);
+        return cite[0] === `${kind}${id}` && node.getAttribute('href') === citeHref(kind, id) ? { kind, id } : null;
+    }
+    // One text node: each marker for a fact or conclusion this project has becomes an in-page link; a marker for
+    // an id the project does not have stays plain text.
+    function linkTextNode(doc, node, index) {
+        const value = node.nodeValue || '';
+        const markers = /\[([FC])([0-9]{1,9})\]/g;
+        const parts = [];
+        let last = 0;
+        let match;
+        while ((match = markers.exec(value)) !== null) {
+            const id = Number(match[2]);
+            const status = index[match[1]][id];
+            if (status === undefined) continue;
+            if (match.index > last) parts.push(doc.createTextNode(value.slice(last, match.index)));
+            parts.push(citeLink(doc, match[1], id, match[0], status));
+            last = match.index + match[0].length;
+        }
+        if (!parts.length) return;
+        if (last < value.length) parts.push(doc.createTextNode(value.slice(last)));
+        const parent = node.parentNode;
+        parts.forEach(part => parent.insertBefore(part, node));
+        parent.removeChild(node);
+    }
+    // Walks a rendered (and sanitised) write-up. Code and existing links are left alone. A marker linked by an
+    // earlier pass (the card is not rebuilt when a fact is rejected or restored) only has its rejected state updated.
+    function linkCitations(doc, root, index) {
+        Array.from(root.childNodes || []).forEach(node => {
+            if (node.nodeType === 3) { linkTextNode(doc, node, index); return; }
+            if (node.nodeType !== 1) return;
+            const tag = String(node.tagName || '').toUpperCase();
+            if (tag === 'A') {
+                const own = ownCitation(node);
+                const status = own ? index[own.kind][own.id] : undefined;
+                if (status !== undefined) setCiteState(node, status);
+                return;
+            }
+            if (tag === 'CODE' || tag === 'PRE') return;
+            linkCitations(doc, node, index);
+        });
+    }
+    function citationFromTarget(node) {
+        for (let n = node; n; n = n.parentNode) {
+            if (n.nodeType === 1 && String(n.tagName || '').toUpperCase() === 'A' && ownCitation(n)) return n;
+        }
+        return null;
+    }
+    // A click on a marker: keep it from reaching the phase card (whose own click opens the editor) and open the
+    // folded box its fact or conclusion sits in. The browser then follows the #anchor.
+    function handleCitationClick(doc, event) {
+        const link = citationFromTarget(event && event.target);
+        if (!link) return false;
+        event.stopPropagation();
+        openFoldedBoxes(doc.getElementById((link.getAttribute('href') || '').slice(1)));
+        return true;
+    }
+
     function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
     // The screen's behaviour, with the document, the fetch helper and the timers passed in so the Node tests can
@@ -215,6 +320,9 @@
                 const phase = slot.getAttribute('data-evidence-phase');
                 slot.appendChild(phaseEvidenceNode(doc, data.phases[phase], ev.rejectedOpen.get(phase), ev.moreOpen.get(phase)));
             });
+            // The anchors exist now, so the markers on the phase cards can link to them.
+            const index = citationIndex(data.phases);
+            Array.from(doc.querySelectorAll('[data-cite-phase]')).forEach(box => linkCitations(doc, box, index));
         }
 
         async function runSearch(words) {
@@ -265,6 +373,7 @@
     const pure = {
         safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController, openFoldedBoxes,
         briefPromptAddition, phaseBriefAddition,
+        NOT_CITED_NOTE, hasCitationMarkers, notCitedNote, citationIndex, linkCitations, handleCitationClick,
     };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
@@ -311,7 +420,11 @@
         if (button) screen.onAction(button);
     });
 
+    // Capture phase: this runs before the phase card's own onclick, so stopping the click here keeps the editor shut.
+    document.addEventListener('click', event => { handleCitationClick(document, event); }, true);
+
     window.evidenceRenderAll = screen.renderAll;
     window.evidenceResetSearch = screen.resetSearch;
     window.evidencePhaseBriefAddition = (project, phaseKey) => phaseBriefAddition(call, project, phaseKey);
+    window.evidenceNotCitedNote = notCitedNote;
 })();

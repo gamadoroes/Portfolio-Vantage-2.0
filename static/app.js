@@ -2108,6 +2108,8 @@ function renderInsights(data) {
                 : '';
             const gapsHtml = renderGaps(phase.gaps);
             const topicsHtml = renderSuggestedTopics(phase.suggested_topics);
+            // A write-up that cites no facts says so above its text (spec section 5). evidence.js links the markers.
+            const citeNote = hasContent && typeof evidenceNotCitedNote === 'function' ? evidenceNotCitedNote(phase.summary) : '';
 
             if (!hasContent) {
                 summaryHtml = `<div class="missing-data-notice"><p>No data available for this phase.</p><button class="btn-research-small" onclick="event.stopPropagation(); triggerDeepResearch('${escapeAttr(phase.title)}')">Research Prompt</button></div>`;
@@ -2126,7 +2128,8 @@ function renderInsights(data) {
                         ${confidenceBadge}
                         ${generateBtn}
                     </div>
-                    <div class="phase-content markdown-body">
+                    <div class="phase-content markdown-body"${hasContent ? ` data-cite-phase="${escapeAttr(key)}"` : ''}>
+                        ${citeNote ? `<p class="ev-not-cited">${escapeHtml(citeNote)}</p>` : ''}
                         ${summaryHtml}
                         ${evidenceSources}
                         ${gapsHtml}

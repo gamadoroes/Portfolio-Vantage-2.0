@@ -4,10 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const E = require('../../static/evidence.js');
 
-// A tiny DOM: enough for evidence.js, and it refuses innerHTML outright.
+// A tiny DOM: enough for evidence.js, and it refuses innerHTML outright. Text nodes exist so the marker linking on
+// the phase cards can be tested; elements keep every child (text nodes too) in `children`.
+class FakeText {
+    constructor(text) { this.nodeType = 3; this.nodeValue = String(text); this.children = []; this.className = ''; }
+    get textContent() { return this.nodeValue; }
+    getAttribute() { return null; }
+}
 class FakeNode {
-    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.className = ''; this.ownText = ''; }
+    constructor(tag) { this.nodeType = 1; this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {}; this.className = ''; this.ownText = ''; }
+    get childNodes() { return this.children; }
     appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+    insertBefore(node, ref) { const at = this.children.indexOf(ref); node.parentNode = this; this.children.splice(at < 0 ? this.children.length : at, 0, node); return node; }
+    removeAttribute(name) { delete this.attributes[name]; }
     get firstChild() { return this.children[0] || null; }
     removeChild(child) { this.children = this.children.filter(c => c !== child); child.parentNode = null; return child; }
     after(node) { const siblings = this.parentNode.children; node.parentNode = this.parentNode; siblings.splice(siblings.indexOf(this) + 1, 0, node); }
@@ -17,16 +26,20 @@ class FakeNode {
     get textContent() { return this.ownText + this.children.map(c => c.textContent).join(''); }
     set innerHTML(value) { throw new Error('evidence.js must never set innerHTML'); }
 }
-const doc = { createElement: tag => new FakeNode(tag) };
+const doc = { createElement: tag => new FakeNode(tag), createTextNode: text => new FakeText(text) };
 
-// A page for the controller: a search input and results box, and a slot for each phase.
-function makePage(phases) {
-    const page = { input: new FakeNode('input'), results: new FakeNode('div'), slots: phases.map(key => { const s = new FakeNode('div'); s.setAttribute('data-evidence-phase', key); return s; }) };
+// A page for the controller: a search input and results box, a slot for each phase, and (optionally) the phase
+// cards' rendered write-ups, each a [data-cite-phase] box.
+function makePage(phases, summaries) {
+    const page = { input: new FakeNode('input'), results: new FakeNode('div'), slots: phases.map(key => { const s = new FakeNode('div'); s.setAttribute('data-evidence-phase', key); return s; }),
+                   summaries: summaries || [] };
     page.input.value = 'typed words';
     page.document = {
         createElement: tag => new FakeNode(tag),
-        getElementById: id => (id === 'evidence-search-input' ? page.input : id === 'evidence-search-results' ? page.results : null),
-        querySelectorAll: () => page.slots,
+        createTextNode: text => new FakeText(text),
+        getElementById: id => (id === 'evidence-search-input' ? page.input : id === 'evidence-search-results' ? page.results
+            : page.slots.map(slot => all(slot, n => n.getAttribute('id') === id)[0]).find(Boolean) || null),
+        querySelectorAll: selector => (selector === '[data-cite-phase]' ? page.summaries : page.slots),
     };
     return page;
 }
@@ -353,6 +366,163 @@ test('a failed, odd or empty briefing leaves the prompt as it was', async () => 
     let asked = false;
     assert.strictEqual(await E.phaseBriefAddition(() => { asked = true; return Promise.resolve({}); }, '', '4'), '');
     assert.strictEqual(asked, false);   // no project: nothing to ask for
+});
+
+// ---- citation markers on the phase cards (spec section 5) ----
+// A rendered write-up: a box like the card's .phase-content, holding paragraphs (text nodes) or ready-made nodes.
+function para(...parts) { const p = new FakeNode('p'); parts.forEach(x => p.appendChild(typeof x === 'string' ? new FakeText(x) : x)); return p; }
+function wrap(tag, ...parts) { const n = new FakeNode(tag); parts.forEach(x => n.appendChild(typeof x === 'string' ? new FakeText(x) : x)); return n; }
+function writeUp(...blocks) {
+    const box = new FakeNode('div');
+    box.setAttribute('data-cite-phase', '1');
+    blocks.forEach(b => box.appendChild(typeof b === 'string' ? para(b) : b));
+    return box;
+}
+const citeLinks = node => all(node, n => n.tagName === 'A' && n.getAttribute('data-cite') !== null);
+const PHASES = { 1: { facts: [fact({ id: 12 }), fact({ id: 13, status: 'rejected' })], conclusions: [conclusion({ id: 3 })] },
+                 4: { facts: [fact({ id: 40, phase_key: '4' })], conclusions: [conclusion({ id: 9, status: 'rejected' })] } };
+const INDEX = E.citationIndex(PHASES);
+
+test('the citation index holds every phase, facts and conclusions apart', () => {
+    assert.deepStrictEqual([INDEX.F[12], INDEX.F[13], INDEX.F[40], INDEX.C[3], INDEX.C[9]], ['active', 'rejected', 'active', 'active', 'rejected']);
+    assert.strictEqual(INDEX.F[3], undefined);       // C3 is a conclusion, not a fact
+    assert.strictEqual(E.citationIndex(undefined).F[1], undefined);
+});
+test('markers for this project become in-page links, and the text around them stays as it was', () => {
+    const box = writeUp('Fees rose [F12] [C3] and [F40].');
+    E.linkCitations(doc, box, INDEX);
+    assert.deepStrictEqual(citeLinks(box).map(a => [a.textContent, a.getAttribute('href'), a.className, a.getAttribute('target')]), [
+        ['[F12]', '#ev-fact-12', 'ev-cite', null], ['[C3]', '#ev-concl-3', 'ev-cite', null], ['[F40]', '#ev-fact-40', 'ev-cite', null]]);
+    assert.strictEqual(box.textContent, 'Fees rose [F12] [C3] and [F40].');
+});
+test('a marker for an id this project does not have stays plain text', () => {
+    const box = writeUp('Gone [F999], [C77] and [f12].');
+    const before = box.children[0].children[0];
+    E.linkCitations(doc, box, INDEX);
+    assert.strictEqual(citeLinks(box).length, 0);
+    assert.strictEqual(box.children[0].children[0], before);        // the text node was not touched
+    assert.strictEqual(box.textContent, 'Gone [F999], [C77] and [f12].');
+});
+test('a marker is one to nine ASCII digits, exactly as the server reads it; anything else stays plain text', () => {
+    const index = E.citationIndex({ 1: { facts: [fact({ id: 12 }), fact({ id: 123456789 }), fact({ id: 123456789012 })], conclusions: [] } });
+    const box = writeUp('Wide [F１２], long [F123456789012], longest [F123456789].');
+    E.linkCitations(doc, box, index);
+    assert.deepStrictEqual(citeLinks(box).map(a => a.textContent), ['[F123456789]']);   // 9 digits is the most the server reads
+    assert.strictEqual(box.textContent, 'Wide [F１２], long [F123456789012], longest [F123456789].');
+    assert.strictEqual(E.hasCitationMarkers('[F１２]'), false);
+    assert.strictEqual(E.hasCitationMarkers('[F123456789012]'), false);
+    assert.strictEqual(E.hasCitationMarkers('[F123456789]'), true);
+    assert.strictEqual(E.notCitedNote('Only [F123456789012] and [C３] here.'), E.NOT_CITED_NOTE);   // so the card and the Sources list agree
+});
+test('a marker for a rejected fact or conclusion is struck through with a Rejected tooltip', () => {
+    const box = writeUp('Old [F13] and [C9], current [F12].');
+    E.linkCitations(doc, box, INDEX);
+    assert.deepStrictEqual(citeLinks(box).map(a => [a.textContent, a.className, a.getAttribute('title')]), [
+        ['[F13]', 'ev-cite rejected', 'Rejected'], ['[C9]', 'ev-cite rejected', 'Rejected'], ['[F12]', 'ev-cite', null]]);
+});
+test('markers in code, and inside existing links, are left alone', () => {
+    const box = writeUp(wrap('pre', wrap('code', '[F12]')), para('Inline ', wrap('code', '[F12]')), para(wrap('a', '[F12]')));
+    E.linkCitations(doc, box, INDEX);
+    assert.strictEqual(citeLinks(box).length, 0);
+    assert.strictEqual(box.textContent, '[F12]Inline [F12][F12]');
+});
+test('markers inside bold, lists and tables are linked too', () => {
+    const box = writeUp(para('Lead ', wrap('strong', 'Deakin [F12]')), wrap('ul', wrap('li', 'Point [C3]')), wrap('table', wrap('tr', wrap('td', '[F40]'))));
+    E.linkCitations(doc, box, INDEX);
+    assert.deepStrictEqual(citeLinks(box).map(a => a.textContent), ['[F12]', '[C3]', '[F40]']);
+});
+test('linking twice does not wrap a link again, and brings the rejected state up to date', () => {
+    const box = writeUp('Fees [F12].');
+    E.linkCitations(doc, box, INDEX);
+    const [link] = citeLinks(box);
+    const rejected = E.citationIndex({ 1: { facts: [fact({ id: 12, status: 'rejected' })], conclusions: [] } });
+    E.linkCitations(doc, box, rejected);
+    assert.deepStrictEqual(citeLinks(box), [link]);
+    assert.deepStrictEqual([link.className, link.getAttribute('title')], ['ev-cite rejected', 'Rejected']);
+    E.linkCitations(doc, box, INDEX);                       // restored
+    assert.deepStrictEqual([link.className, link.getAttribute('title')], ['ev-cite', null]);
+    assert.strictEqual(box.textContent, 'Fees [F12].');
+});
+// A link dressed up as a citation: DOMPurify keeps a data-* attribute, so a write-up can carry one.
+function dressedUpLink(text, href, cite) {
+    const link = wrap('a', text);
+    link.setAttribute('href', href); link.setAttribute('data-cite', cite); link.className = 'theirs';
+    return link;
+}
+test('a link that is not one of ours is never styled as a citation, whatever data-cite says', () => {
+    const outside = dressedUpLink('Deakin [F12]', 'https://evil.example/fees', 'F12');
+    const rejectedOutside = dressedUpLink('Old', 'https://evil.example/old', 'F13');
+    const wrongAnchor = dressedUpLink('Elsewhere', '#ev-fact-13', 'F12');      // in-page, but not the anchor its data-cite names
+    const wrongKind = dressedUpLink('Kind', '#ev-concl-12', 'F12');            // F12 is a fact; this is a conclusion's anchor
+    const box = writeUp(para(outside), para(rejectedOutside), para(wrongAnchor), para(wrongKind));
+    E.linkCitations(doc, box, INDEX);
+    assert.deepStrictEqual([outside, rejectedOutside, wrongAnchor, wrongKind].map(a => [a.className, a.getAttribute('title'), a.getAttribute('href')]), [
+        ['theirs', null, 'https://evil.example/fees'], ['theirs', null, 'https://evil.example/old'], ['theirs', null, '#ev-fact-13'], ['theirs', null, '#ev-concl-12']]);
+    assert.strictEqual(box.textContent, 'Deakin [F12]OldElsewhereKind');   // the marker inside the outside link is not linked either
+    assert.strictEqual(all(box, n => /^ev-cite/.test(n.className)).length, 0);
+});
+test('clicking a link that is not one of ours is left alone: the click is not stopped', () => {
+    const outside = dressedUpLink('Deakin', 'https://evil.example/fees', 'F12');
+    writeUp(para(outside));
+    let stopped = false;
+    assert.strictEqual(E.handleCitationClick(doc, { target: outside, stopPropagation: () => { stopped = true; } }), false);
+    assert.strictEqual(stopped, false);
+});
+test('markup-looking text next to a marker stays text', () => {
+    const box = writeUp('<img src=x onerror=alert(1)> [F12] <script>x</script>');
+    E.linkCitations(doc, box, INDEX);
+    assert.strictEqual(tagged(box, 'img').length + tagged(box, 'script').length, 0);
+    assert.strictEqual(box.textContent, '<img src=x onerror=alert(1)> [F12] <script>x</script>');
+    assert.strictEqual(citeLinks(box).length, 1);
+});
+test('a conclusion carries the anchor its markers link to', () => {
+    assert.strictEqual(E.conclusionNode(doc, conclusion({ id: 3 })).getAttribute('id'), 'ev-concl-3');
+});
+test('a write-up with no markers gets the Not fact-cited note; one with markers, or none at all, does not', () => {
+    assert.strictEqual(E.NOT_CITED_NOTE, 'Not fact-cited — written from the reports only.');
+    assert.strictEqual(E.notCitedNote('Written from the reports.'), E.NOT_CITED_NOTE);
+    assert.strictEqual(E.notCitedNote('Lowercase [f1] is not a marker.'), E.NOT_CITED_NOTE);
+    ['Cited [F1].', 'Concluded [C2].', '', '   ', 'MISSING', null, undefined, 42].forEach(summary =>
+        assert.strictEqual(E.notCitedNote(summary), '', String(summary)));
+});
+test('clicking a marker stops the click reaching the phase card and opens the fold its fact sits in', async () => {
+    const box = writeUp('Old fact [F3].');
+    const page = makePage(['1'], [box]); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P');
+    env.requests[0].resolve({ success: true, phases: { 1: { facts: manyFacts(25).map(f => Object.assign(f, { phase_key: '1' })), conclusions: [] } } });
+    await flush();
+    const [link] = citeLinks(box);
+    let stopped = false;
+    assert.strictEqual(E.handleCitationClick(page.document, { target: link, stopPropagation: () => { stopped = true; } }), true);
+    assert.strictEqual(stopped, true);
+    assert.strictEqual(byClass(page.slots[0], 'ev-more')[0].open, true);
+    let other = false;
+    assert.strictEqual(E.handleCitationClick(page.document, { target: box.children[0], stopPropagation: () => { other = true; } }), false);
+    assert.strictEqual(other, false);                       // any other click on the card still opens the editor
+});
+test('the controller links the cards once the facts load, and re-marks them after a reject', async () => {
+    const box = writeUp('Fees [F12] and [C3].');
+    const page = makePage(['1'], [box]); const env = makeEnv(page); const screen = E.createController(env);
+    screen.renderAll('P');
+    assert.strictEqual(citeLinks(box).length, 0);           // nothing to link to until the anchors exist
+    env.requests[0].resolve({ success: true, phases: PHASES }); await flush();
+    assert.deepStrictEqual(citeLinks(box).map(a => a.className), ['ev-cite', 'ev-cite']);
+    const rejected = JSON.parse(JSON.stringify(PHASES)); rejected[1].facts[0].status = 'rejected';
+    screen.renderAll('P');
+    env.requests[1].resolve({ success: true, phases: rejected }); await flush();
+    assert.deepStrictEqual(citeLinks(box).map(a => a.className), ['ev-cite rejected', 'ev-cite']);
+});
+test('a past Insights version (no slots) or a failed load leaves the markers as plain text', async () => {
+    const past = writeUp('Fees [F12].');
+    const pastPage = makePage([], [past]); const pastEnv = makeEnv(pastPage);
+    E.createController(pastEnv).renderAll('P');
+    assert.strictEqual(pastEnv.requests.length, 0);
+    assert.strictEqual(citeLinks(past).length, 0);
+    const box = writeUp('Fees [F12].');
+    const page = makePage(['1'], [box]); const env = makeEnv(page);
+    E.createController(env).renderAll('P');
+    env.requests[0].reject(new Error('Something went wrong (500).')); await flush();
+    assert.strictEqual(citeLinks(box).length, 0);
 });
 
 (async () => {

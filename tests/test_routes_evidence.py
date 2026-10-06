@@ -304,3 +304,15 @@ def test_phase_7_keeps_the_markers_word_for_word_with_the_options_report():
     body = _between(source, "function buildPriorPhaseContextForPhase7(", "function inferFieldConfidence(")
     assert "if (sections.length === 0) return '';" in body                   # still empty when there is nothing
     assert r"return `${KEEP_CITATION_MARKERS}\n\n${clipped}`;" in body
+
+
+def test_a_phase_card_marks_its_write_up_for_linking_and_shows_the_note_as_text():
+    body = _between(_static("app.js"), "function renderInsights(", "function renderConfidenceBadge(")
+    assert ("const citeNote = hasContent && typeof evidenceNotCitedNote === 'function' "
+            "? evidenceNotCitedNote(phase.summary) : '';") in body
+    assert '<div class="phase-content markdown-body"${hasContent ? ` data-cite-phase="${escapeAttr(key)}"` : \'\'}>' in body
+    assert "${citeNote ? `<p class=\"ev-not-cited\">${escapeHtml(citeNote)}</p>` : ''}" in body
+
+
+def test_the_note_reads_the_same_on_screen_and_in_the_word_report():
+    assert f"const NOT_CITED_NOTE = '{evidence_service.NOT_CITED_NOTE}';" in _static("evidence.js")

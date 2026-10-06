@@ -1355,3 +1355,9 @@ mark.selection-highlight { background: rgba(255, 138, 0, 0.25); border-bottom: 2
 .ev-btn:hover { border-color: var(--oes-ink); }
 .ev-rejected summary, .ev-more summary { cursor: pointer; font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
 .ev-results { margin-top: 0.5rem; }
+
+/* Citation markers on the phase cards (evidence.js) */
+.ev-not-cited { font-size: 0.8rem; font-style: italic; color: #8a6d00; margin: 0 0 0.75rem; }
+a.ev-cite { color: var(--oes-ink); font-size: 0.85em; font-weight: 600; text-decoration: none; border-bottom: 1px dotted currentColor; white-space: nowrap; }
+a.ev-cite:hover { color: var(--oes-valencia); }
+a.ev-cite.rejected { color: #999; text-decoration: line-through; border-bottom: none; }
