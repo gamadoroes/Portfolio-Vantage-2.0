@@ -155,6 +155,29 @@
         return wrap;
     }
 
+    // ---- Generate: the phase's facts briefing (spec section 4) ----
+    // The sentence "part of your source data" is there because the prompt says to use ONLY the Source Data files.
+    const BRIEF_INTRO = 'FACTS BRIEFING — the checked facts and conclusions saved for this phase. This briefing is part of your source data, so its facts may be used and cited. Build the write-up on these first and cite them as the rules below say; use the attached source files for colour and context.';
+
+    // What Generate adds to a phase's prompt: the briefing when the phase has checked facts, or has rejected ones
+    // the briefing says not to use; otherwise nothing, so a phase with neither is written exactly as before.
+    function briefPromptAddition(brief) {
+        if (!brief || typeof brief.text !== 'string' || !brief.text.trim()) return '';
+        if (!(Number(brief.fact_count) > 0) && !(Number(brief.rejected_count) > 0)) return '';
+        return `\n\n${BRIEF_INTRO}\n\n${brief.text.trim()}`;
+    }
+    // Fetches the phase's briefing and returns the prompt addition. Any failure returns '', so Generate never
+    // fails because of the facts.
+    async function phaseBriefAddition(call, project, phaseKey) {
+        if (!project) return '';
+        try {
+            const data = await call('GET', `/api/evidence/brief?project=${encodeURIComponent(project)}&phase=${encodeURIComponent(phaseKey)}`);
+            return briefPromptAddition(data && data.brief);
+        } catch (err) {
+            return '';
+        }
+    }
+
     function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
     // The screen's behaviour, with the document, the fetch helper and the timers passed in so the Node tests can
@@ -239,7 +262,10 @@
         return { renderAll, runSearch, resetSearch, onSearchInput, onAction, rememberRejectedBox, rememberMoreBox };
     }
 
-    const pure = { safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController, openFoldedBoxes };
+    const pure = {
+        safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController, openFoldedBoxes,
+        briefPromptAddition, phaseBriefAddition,
+    };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -287,4 +313,5 @@
 
     window.evidenceRenderAll = screen.renderAll;
     window.evidenceResetSearch = screen.resetSearch;
+    window.evidencePhaseBriefAddition = (project, phaseKey) => phaseBriefAddition(call, project, phaseKey);
 })();

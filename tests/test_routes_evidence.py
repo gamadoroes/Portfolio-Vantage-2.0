@@ -264,3 +264,43 @@ def test_the_word_report_downloads_when_stored_text_has_control_characters(clien
     assert f"F{fact_id} — cd — ab (2026) — https://deakin.example/fees" in texts
     brief = client.get("/api/evidence/brief?project=P&phase=4").get_json()["brief"]["text"]
     assert not re.search("[\x00-\x08\x0e-\x1f\ufffe\uffff]", brief)
+
+
+# ---- app.js glue (app.js cannot run under Node, so these check its source) ----
+
+def _static(name):
+    return (Path(__file__).resolve().parents[1] / "static" / name).read_text(encoding="utf-8")
+
+
+def _between(source, start, end):
+    return source[source.index(start):source.index(end, source.index(start))]
+
+
+def test_generate_adds_the_briefing_after_the_guidance_and_before_the_users_instructions():
+    body = _between(_static("app.js"), "async function generatePhaseInsight(", "async function handleInsightResponse(")
+    added = body.index("prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);")
+    assert body.index("CRITICAL INSTRUCTIONS:") < added < body.index("USER INSTRUCTIONS:")
+    assert "typeof evidencePhaseBriefAddition === 'function'" in body       # an old cached evidence.js adds nothing
+    switched = body.index("if (currentProject !== briefProject) {")        # a project switch while it loads stops
+    assert added < switched
+
+
+def test_generate_checks_for_a_running_generation_before_and_after_waiting_for_the_briefing():
+    body = _between(_static("app.js"), "async function generatePhaseInsight(", "async function handleInsightResponse(")
+    added = body.index("prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);")
+    check = "if (refuseIfRunning()) return;"
+    assert body.count(check) == 2
+    first = body.index(check)
+    second = body.index(check, first + 1)
+    assert first < added < second                                           # before the wait, and again once it is over
+    assert body.index("if (currentProject !== briefProject) {") < second
+    assert body.count("An insight generation is already running for this project.") == 1   # one message, one helper
+    assert body.count("getActiveGenerationForProject(currentProject)") == 1
+
+
+def test_phase_7_keeps_the_markers_word_for_word_with_the_options_report():
+    source = _static("app.js")
+    assert f"const KEEP_CITATION_MARKERS = '{evidence_service.KEEP_MARKERS_INSTRUCTION}';" in source
+    body = _between(source, "function buildPriorPhaseContextForPhase7(", "function inferFieldConfidence(")
+    assert "if (sections.length === 0) return '';" in body                   # still empty when there is nothing
+    assert r"return `${KEEP_CITATION_MARKERS}\n\n${clipped}`;" in body

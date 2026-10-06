@@ -147,6 +147,10 @@ function getFileIdByName(filename) {
     return null;
 }
 
+// Phase 7 draws on the phase write-ups, which cite checked facts as [F#] / [C#]. Kept word for word in step with
+// evidence_service.KEEP_MARKERS_INSTRUCTION (tests/test_routes_evidence.py checks).
+const KEEP_CITATION_MARKERS = 'Keep the [F#] and [C#] citation markers from the phase write-ups exactly as written, next to each point you take from them.';
+
 function buildPriorPhaseContextForPhase7() {
     if (!currentInsightsData || !currentInsightsData.phases) return '';
 
@@ -165,7 +169,8 @@ function buildPriorPhaseContextForPhase7() {
     if (sections.length === 0) return '';
     const merged = sections.join('\n\n---\n\n');
     const MAX_CONTEXT_CHARS = 120000;
-    return merged.length > MAX_CONTEXT_CHARS ? merged.slice(0, MAX_CONTEXT_CHARS) : merged;
+    const clipped = merged.length > MAX_CONTEXT_CHARS ? merged.slice(0, MAX_CONTEXT_CHARS) : merged;
+    return `${KEEP_CITATION_MARKERS}\n\n${clipped}`;
 }
 
 function inferFieldConfidence(value) {
@@ -1714,16 +1719,34 @@ CRITICAL INSTRUCTIONS:
 3. Return Markdown only (no JSON).
 4. If no reliable evidence exists in the provided sources, return exactly: MISSING`;
 
+    // Asked before the briefing is fetched, so a second click does not fetch it for nothing, and again once it has
+    // arrived, because another generation can start while it loads.
+    const refuseIfRunning = () => {
+        if (!getActiveGenerationForProject(currentProject)) return false;
+        alert('An insight generation is already running for this project. Please wait for it to complete.');
+        if(btn) { btn.innerText = "Generate"; btn.disabled = false; }
+        hideInsightsIndicator();
+        return true;
+    };
+
+    // Facts first (spec section 4): when this phase has checked facts, the server's facts briefing follows the
+    // guidance. A phase without facts, or a failed request, leaves the prompt exactly as before.
+    const briefProject = currentProject;
+    if (typeof evidencePhaseBriefAddition === 'function') {
+        if (refuseIfRunning()) return;
+        prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);
+        if (currentProject !== briefProject) {  // the person switched project while the briefing loaded
+            if (btn) { btn.innerText = "Generate"; btn.disabled = false; }
+            hideInsightsIndicator();
+            return;
+        }
+    }
+
     if (userInstructions && userInstructions.trim()) {
         prompt += `\n\nUSER INSTRUCTIONS:\n${userInstructions.trim()}`;
     }
 
-    if (getActiveGenerationForProject(currentProject)) {
-        alert('An insight generation is already running for this project. Please wait for it to complete.');
-        if(btn) { btn.innerText = "Generate"; btn.disabled = false; }
-        hideInsightsIndicator();
-        return;
-    }
+    if (refuseIfRunning()) return;
 
     // Enforce explicit phase scoping:
     // - Phases 1-6: must have linked source files.

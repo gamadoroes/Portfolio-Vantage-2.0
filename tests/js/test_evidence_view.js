@@ -321,6 +321,40 @@ test('a failed Reject or Restore shows one error message, replaced on each retry
     assert.strictEqual(button.disabled, false);
 });
 
+// ---- Generate: the facts briefing (spec section 4) ----
+const BRIEF = { text: '# CHECKED FACTS FOR PHASE 1 (newest first)\n[F1] A claim', fact_count: 1, conclusion_count: 0, shown_facts: 1, rejected_count: 0 };
+test('the briefing goes into the prompt when the phase has checked facts or rejected ones to avoid', () => {
+    const added = E.briefPromptAddition(BRIEF);
+    assert(added.startsWith('\n\nFACTS BRIEFING'));
+    assert(added.endsWith('\n\n' + BRIEF.text));
+    assert(added.includes('part of your source data'));   // the prompt's "only use the Source Data files" must not forbid it
+    assert.strictEqual(E.briefPromptAddition(Object.assign({}, BRIEF, { fact_count: 0 })), '');
+    // every fact rejected: the "do not use" list still goes in
+    assert.strictEqual(E.briefPromptAddition(Object.assign({}, BRIEF, { fact_count: 0, rejected_count: 2 })), added);
+    [null, undefined, {}, { fact_count: 2, text: '' }, { fact_count: 2, text: '   ' }, { fact_count: 2 }, { fact_count: 'none', text: 'x' },
+        { rejected_count: 2, text: ' ' }, { rejected_count: 2 }, { fact_count: 'none', rejected_count: 'many', text: 'x' }]
+        .forEach(brief => assert.strictEqual(E.briefPromptAddition(brief), '', JSON.stringify(brief)));
+});
+test('Generate asks for the briefing of this project and phase', async () => {
+    const asked = [];
+    const call = (method, url) => { asked.push([method, url]); return Promise.resolve({ success: true, brief: BRIEF }); };
+    assert.strictEqual(await E.phaseBriefAddition(call, 'My Project & Co', '4'), E.briefPromptAddition(BRIEF));
+    assert.deepStrictEqual(asked, [['GET', '/api/evidence/brief?project=My%20Project%20%26%20Co&phase=4']]);
+});
+test('a failed, odd or empty briefing leaves the prompt as it was', async () => {
+    const answers = [
+        () => Promise.reject(new Error('Something went wrong (500).')),
+        () => { throw new Error('offline'); },
+        () => Promise.resolve(null),
+        () => Promise.resolve({ success: true }),
+        () => Promise.resolve({ success: true, brief: Object.assign({}, BRIEF, { fact_count: 0 }) }),
+    ];
+    for (const call of answers) assert.strictEqual(await E.phaseBriefAddition(call, 'P', '4'), '');
+    let asked = false;
+    assert.strictEqual(await E.phaseBriefAddition(() => { asked = true; return Promise.resolve({}); }, '', '4'), '');
+    assert.strictEqual(asked, false);   // no project: nothing to ask for
+});
+
 (async () => {
 let failed = 0;
 for (const [name, fn] of tests) {
