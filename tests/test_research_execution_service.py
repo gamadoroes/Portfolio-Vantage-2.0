@@ -247,4 +247,28 @@ def test_a_failed_sources_lookup_still_saves_the_options_report(pid, monkeypatch
     card_id = _ready_card(pid, method="SYNTHESIS", phase="7", title="Options report")
     research_execution_service.start_runs("P", [card_id])
     assert research_runs_repo.find_latest_for_work_item(card_id)["output_text"] == f"Option A [F{fact}]."
+    assert insights_service.load_current_insights("P")["phases"]["7"]["summary"] == f"Option A [F{fact}]."
+    assert research_work_items_repo.get(card_id)["status"] == "COMPLETE"
+
+
+def test_a_console_that_cannot_show_the_lookup_error_still_saves_the_options_report(pid, monkeypatch):
+    fact = _cited_phases(pid)
+
+    def broken(project_name):
+        raise RuntimeError("could not read “Deakin” — é")
+
+    def cp1252_console(*args, **kwargs):
+        raise UnicodeEncodeError("charmap", "“", 0, 1, "character maps to <undefined>")
+
+    monkeypatch.setattr(evidence_service, "citation_index", broken)
+    # A module-level name shadows the builtin only for this module's own print calls.
+    monkeypatch.setattr(research_execution_service, "print", cp1252_console, raising=False)
+    monkeypatch.setattr(llm_service, "prompt_completion",
+                        lambda system, user, max_tokens=4000: f"Option A [F{fact}].")
+    card_id = _ready_card(pid, method="SYNTHESIS", phase="7", title="Options report")
+    research_execution_service.start_runs("P", [card_id])
+    run = research_runs_repo.find_latest_for_work_item(card_id)
+    assert run["status"] == "completed"
+    assert run["output_text"] == f"Option A [F{fact}]."
+    assert insights_service.load_current_insights("P")["phases"]["7"]["summary"] == f"Option A [F{fact}]."
     assert research_work_items_repo.get(card_id)["status"] == "COMPLETE"

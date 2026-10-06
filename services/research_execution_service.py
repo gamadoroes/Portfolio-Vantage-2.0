@@ -159,7 +159,10 @@ def _options_sources(project_name, text):
     try:
         return evidence_service.sources_markdown(text, evidence_service.citation_index(project_name))
     except Exception as exc:
-        print(f"[board] could not list the sources of the options report: {exc}")
+        try:  # a console that cannot show the text (cp1252, redirected output) must not lose the report either
+            print(f"[board] could not list the sources of the options report: {ascii(str(exc))}")
+        except Exception:
+            pass
         return ""
 
 
