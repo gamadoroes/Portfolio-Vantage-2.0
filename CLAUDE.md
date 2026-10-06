@@ -83,6 +83,7 @@ Settings are read in `config.py` from environment variables, or from a `.env` fi
 - `OPENAI_DEEP_RESEARCH_MODEL` (default: `o4-mini-deep-research`)
 - `FLASK_SECRET_KEY`
 - `DATABASE_PATH` and `BACKUP_DIR` (see below)
+- `PROJECTS_DIR` — where project folders live; default `projects/` beside `app.py` (resolved from the app's own location, like the database, so the start folder does not matter). Tests and `scripts/run_board_demo.py` point it at temporary folders.
 
 ## Database and backups
 

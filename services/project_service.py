@@ -1,7 +1,10 @@
+import os
 from pathlib import Path
 
-from .storage import read_text, write_text
+from config import APP_ROOT
 from db.repositories import projects_repo, sources_repo
+
+from .storage import read_text, write_text
 
 _INVALID_PATH_CHARS = set('<>:"/\\|?*')
 _WINDOWS_RESERVED_NAMES = {
@@ -31,8 +34,11 @@ _WINDOWS_RESERVED_NAMES = {
 
 
 def get_projects_dir():
-    projects_dir = Path("projects")
-    projects_dir.mkdir(exist_ok=True)
+    # Beside the app, like the database and backups, so the folder the app is started from cannot hide
+    # the project files (a different start folder once made the file index drop every file). PROJECTS_DIR
+    # overrides it; the tests and the demo launcher point it at their own temporary folders.
+    projects_dir = Path(os.environ.get("PROJECTS_DIR") or APP_ROOT / "projects")
+    projects_dir.mkdir(parents=True, exist_ok=True)
     return projects_dir
 
 

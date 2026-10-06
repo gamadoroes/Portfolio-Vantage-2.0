@@ -1,5 +1,5 @@
-from db.repositories import projects_repo
 import services.project_service as project_service
+from db.repositories import projects_repo
 
 
 def test_create_project_registers_db_row_and_creates_dirs(temp_db, tmp_path, monkeypatch):
@@ -37,3 +37,26 @@ def test_config_round_trip_selected_files(temp_db, tmp_path, monkeypatch):
     assert config["selected_files"] == []
     assert config["selected_file_ids"] == []
     assert config["created"] is not None
+
+
+# ---- the projects folder does not depend on the folder the app is started from ----
+
+def test_projects_folder_sits_beside_the_app_whatever_the_start_folder(tmp_path, monkeypatch):
+    from config import APP_ROOT
+    monkeypatch.delenv("PROJECTS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert project_service.get_projects_dir().resolve() == (APP_ROOT / "projects").resolve()
+    assert not (tmp_path / "projects").exists()
+
+
+def test_projects_folder_can_be_set(tmp_path, monkeypatch):
+    target = tmp_path / "elsewhere" / "projects"
+    monkeypatch.setenv("PROJECTS_DIR", str(target))
+    assert project_service.get_projects_dir() == target
+    assert target.is_dir()
+
+
+def test_tests_keep_using_their_own_temporary_folder(tmp_path, monkeypatch):
+    # conftest points PROJECTS_DIR at a relative "projects", so a test that changes into tmp_path stays there.
+    monkeypatch.chdir(tmp_path)
+    assert project_service.get_projects_dir().resolve() == (tmp_path / "projects").resolve()
