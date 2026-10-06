@@ -7,7 +7,7 @@ from pydantic import Field
 from db.repositories import research_work_items_repo
 
 from .. import research_task_service
-from ..prompt_drafting_service import create_drafted_card
+from ..prompt_drafting_service import create_drafted_card, draft_prompts
 from ..prompt_frameworks import resolve_framework
 from .activity import record_user_action
 from .registry import Tool, ToolError, register
@@ -79,22 +79,19 @@ def create_research_task(ctx, inputs):
     tasks = inputs.tasks
     _check_dependencies(ctx, tasks)  # everything is checked before anything is created
     new_ids = []
-    drafted = 0
+    to_draft = []  # (card id, draft job) for each card that still needs its prompt drafted
     for t in tasks:
         framework = resolve_framework(t.phase_key, t.framework_key)
-        if t.prompt_text or not t.draft_prompt:
-            card_id = research_task_service.create_task(
-                ctx.project_id, t.phase_key, t.title, priority=t.priority, research_method=t.research_method,
-                entities=t.focus or None, rationale=t.rationale or None, framework_key=framework,
-                prompt_text=t.prompt_text or None,
-            )
-        else:
-            created = create_drafted_card(
-                ctx.project_name, t.phase_key, t.title, research_method=t.research_method, focus=t.focus or None,
-                rationale=t.rationale or None, framework_key=framework, priority=t.priority,
-            )
-            card_id = created["card_id"]
-            drafted += 1 if created["drafted"] else 0
+        card_id = research_task_service.create_task(
+            ctx.project_id, t.phase_key, t.title, priority=t.priority, research_method=t.research_method,
+            entities=t.focus or None, rationale=t.rationale or None, framework_key=framework,
+            prompt_text=t.prompt_text or None,
+        )
+        if not (t.prompt_text or not t.draft_prompt):
+            to_draft.append((card_id, {
+                "phase_key": t.phase_key, "framework_key": framework, "title": t.title,
+                "focus": t.focus or None, "rationale": t.rationale or None,
+            }))
         new_ids.append(card_id)
         if ctx.caller == "user":
             record_user_action(ctx, "user_add", card_id)
@@ -103,6 +100,13 @@ def create_research_task(ctx, inputs):
             research_task_service.add_dependency(new_ids[i], dep_id)
         for index in t.depends_on_batch_indices:
             research_task_service.add_dependency(new_ids[i], new_ids[index])
+    # Every card exists now. The prompts take a slow Claude call each, so they are written at the same time; the
+    # database is written here, one card at a time in task order (a prompt the person wrote meanwhile wins).
+    drafted = 0
+    drafts = draft_prompts(ctx.project_name, [job for _, job in to_draft])
+    for (card_id, _), draft in zip(to_draft, drafts, strict=True):
+        research_work_items_repo.fill_empty_draft_prompt(card_id, draft["prompt_text"])
+        drafted += 1 if draft["drafted"] else 0
     return {"created_task_ids": new_ids, "drafted_from_framework": drafted}
 
 

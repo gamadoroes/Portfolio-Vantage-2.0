@@ -3,6 +3,10 @@
 phase's framework. This is the server-side replacement for the Prompt Developer's
 "Generate Master Prompt"."""
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+
+from flask import current_app, has_app_context
 
 from db.repositories import projects_repo, research_work_items_repo
 
@@ -12,6 +16,8 @@ from .prompt_frameworks import get_framework, resolve_framework
 
 # Starts every fallback prompt; Approve refuses a prompt that still contains it.
 FALLBACK_MARKER = "[Couldn't draft this from the framework. Edit the prompt before approving.]"
+# How many prompts are drafted (one slow Claude call each) at the same time when a batch of cards is created.
+MAX_DRAFT_WORKERS = 4
 
 
 def strip_prompt_budget_sections(prompt_text):
@@ -91,6 +97,32 @@ def draft_prompt(project_name, phase_key, framework_key, title, focus=None, rati
     if not text or not text.strip():
         return {"prompt_text": fallback_prompt(title, focus, objective), "framework_key": resolved, "drafted": False}
     return {"prompt_text": text.strip(), "framework_key": resolved, "drafted": True}
+
+
+def draft_prompts(project_name, jobs):
+    """Draft several prompts at the same time and return draft_prompt's result for each, in the order of `jobs`.
+
+    Each job is a dict of draft_prompt's arguments after the project name (phase_key, framework_key, title and,
+    optionally, focus and rationale). Only the slow Claude calls run in other threads; each runs inside the
+    caller's Flask app context (llm_service needs it), and writing the results to the database is left to the
+    caller. Never raises: a job that fails gets the fallback prompt and the other jobs carry on."""
+    jobs = list(jobs)
+    if not jobs:
+        return []
+    # Worker threads start with no app context of their own. Without one here (some tests) there is nothing to pass on.
+    app = current_app._get_current_object() if has_app_context() else None
+
+    def draft_one(job):
+        try:
+            with app.app_context() if app else nullcontext():
+                return draft_prompt(project_name, **job)
+        except Exception as exc:  # draft_prompt does not raise; this is for what nobody planned for
+            print(f"[prompt-drafting] could not draft {ascii(job.get('title'))}: {ascii(str(exc))}")
+            return {"prompt_text": fallback_prompt(job.get("title"), job.get("focus"), ""),
+                    "framework_key": job.get("framework_key"), "drafted": False}
+
+    with ThreadPoolExecutor(max_workers=min(MAX_DRAFT_WORKERS, len(jobs))) as pool:
+        return list(pool.map(draft_one, jobs))  # map keeps the input order, whichever draft finishes first
 
 
 def create_drafted_card(
