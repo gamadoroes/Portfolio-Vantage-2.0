@@ -87,14 +87,25 @@
     }
     const pageFact = (doc, fact) => factNode(doc, fact, false);
 
-    // Whether each phase's "Show rejected" box is open. Kept per phase, outside the DOM, so a reject/restore re-render
-    // (which rebuilds the nodes) leaves the box as the person had it.
+    // Facts are shown newest first, and only this many at a time: the rest are folded under "Show n more".
+    const FACTS_SHOWN = 10;
+
+    // A link to a fact that is folded away ("Show rejected", "Show n more") opens every folded box the fact sits in,
+    // so the browser's jump to the #anchor lands on something visible.
+    function openFoldedBoxes(node) {
+        for (let box = node && node.parentNode; box; box = box.parentNode) {
+            if (box.tagName && box.tagName.toUpperCase() === 'DETAILS') box.open = true;
+        }
+    }
+
+    // Whether each phase's "Show rejected" box (and, in a second map, its "Show n more" box) is open. Kept per phase,
+    // outside the DOM, so a reject/restore re-render (which rebuilds the nodes) leaves the box as the person had it.
     function createOpenState() {
         const open = {};
         return { get: phase => open[phase] === true, set: (phase, value) => { open[phase] = value === true; } };
     }
 
-    function phaseEvidenceNode(doc, data, rejectedOpen) {
+    function phaseEvidenceNode(doc, data, rejectedOpen, moreOpen) {
         const facts = (data && data.facts) || [];
         const conclusions = (data && data.conclusions) || [];
         const wrap = el(doc, 'section', 'ev-phase');
@@ -110,8 +121,17 @@
             wrap.appendChild(listNode(doc, live(conclusions), conclusionNode));
         }
         if (live(facts).length) {
-            wrap.appendChild(el(doc, 'h4', null, `Facts (${live(facts).length})`));
-            wrap.appendChild(listNode(doc, live(facts), pageFact));
+            const newestFirst = live(facts).slice().sort((a, b) => Number(b.id) - Number(a.id));
+            wrap.appendChild(el(doc, 'h4', null, `Facts (${newestFirst.length})`));
+            wrap.appendChild(listNode(doc, newestFirst.slice(0, FACTS_SHOWN), pageFact));
+            if (newestFirst.length > FACTS_SHOWN) {
+                const older = newestFirst.slice(FACTS_SHOWN);
+                const more = el(doc, 'details', 'ev-more');
+                if (moreOpen) more.setAttribute('open', '');
+                more.appendChild(el(doc, 'summary', null, `Show ${older.length} more`));
+                more.appendChild(listNode(doc, older, pageFact));
+                wrap.appendChild(more);
+            }
         }
         const hidden = gone(conclusions).length + gone(facts).length;
         if (hidden) {
@@ -142,7 +162,7 @@
     // the one it started for before it paints anything.
     function createController(env) {
         const doc = env.document;
-        const ev = { project: null, seq: 0, searchSeq: 0, timer: null, rejectedOpen: createOpenState() };
+        const ev = { project: null, seq: 0, searchSeq: 0, timer: null, rejectedOpen: createOpenState(), moreOpen: createOpenState() };
         const slots = () => Array.from(doc.querySelectorAll('[data-evidence-phase]'));
 
         function resetSearch() {
@@ -155,7 +175,7 @@
         }
 
         async function renderAll(project) {
-            if (project !== ev.project) { ev.project = project; ev.rejectedOpen = createOpenState(); resetSearch(); }
+            if (project !== ev.project) { ev.project = project; ev.rejectedOpen = createOpenState(); ev.moreOpen = createOpenState(); resetSearch(); }
             const seq = ++ev.seq;
             if (!project || !slots().length) return;
             let data;
@@ -170,7 +190,7 @@
             slots().forEach(slot => {
                 clear(slot);
                 const phase = slot.getAttribute('data-evidence-phase');
-                slot.appendChild(phaseEvidenceNode(doc, data.phases[phase], ev.rejectedOpen.get(phase)));
+                slot.appendChild(phaseEvidenceNode(doc, data.phases[phase], ev.rejectedOpen.get(phase), ev.moreOpen.get(phase)));
             });
         }
 
@@ -214,11 +234,12 @@
         }
 
         function rememberRejectedBox(phase, open) { ev.rejectedOpen.set(phase, open); }
+        function rememberMoreBox(phase, open) { ev.moreOpen.set(phase, open); }
 
-        return { renderAll, runSearch, resetSearch, onSearchInput, onAction, rememberRejectedBox };
+        return { renderAll, runSearch, resetSearch, onSearchInput, onAction, rememberRejectedBox, rememberMoreBox };
     }
 
-    const pure = { safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController };
+    const pure = { safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController, openFoldedBoxes };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
     // ---------------- browser glue ----------------
@@ -241,22 +262,23 @@
         if (event.target && event.target.id === 'evidence-search-input') screen.onSearchInput(event.target.value);
     });
 
-    // "toggle" does not bubble, so listen in the capture phase to remember each phase's Show rejected box.
+    // "toggle" does not bubble, so listen in the capture phase to remember each phase's Show rejected and Show n more boxes.
     document.addEventListener('toggle', event => {
         const box = event.target;
-        if (!box || !box.classList || !box.classList.contains('ev-rejected')) return;
+        if (!box || !box.classList) return;
+        const remember = box.classList.contains('ev-rejected') ? screen.rememberRejectedBox
+            : box.classList.contains('ev-more') ? screen.rememberMoreBox : null;
+        if (!remember) return;
         const slot = box.closest('[data-evidence-phase]');
-        if (slot) screen.rememberRejectedBox(slot.getAttribute('data-evidence-phase'), box.open);
+        if (slot) remember(slot.getAttribute('data-evidence-phase'), box.open);
     }, true);
 
     document.addEventListener('click', event => {
         const target = event.target;
         if (!target || !target.closest) return;
         const ref = target.closest('a.ev-ref');
-        if (ref) {  // open "Show rejected" if the fact is in there; the browser then follows the #anchor
-            const factEl = document.getElementById((ref.getAttribute('href') || '').slice(1));
-            const box = factEl && factEl.closest('details');
-            if (box) box.open = true;
+        if (ref) {  // open "Show rejected" or "Show n more" if the fact is folded in one; the browser then follows the #anchor
+            openFoldedBoxes(document.getElementById((ref.getAttribute('href') || '').slice(1)));
             return;
         }
         const button = target.closest('[data-ev-act]');

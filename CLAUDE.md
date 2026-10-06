@@ -49,7 +49,7 @@ python -m pytest tests/ -v
 - No framework; vanilla JS with Marked.js (markdown), DOMPurify (sanitization), Turndown (HTML→MD)
 - 6 tabs: Builder, Research, Insights, Methodology, Objective, Artifacts
 - **Research** tab (`static/board.js`, `routes/board.py`, `services/board_service.py`): the Supervisor drafts research cards with prompts built from the phase frameworks (`services/prompt_frameworks.json`); the user edits, approves and runs them; finished reports are reviewed automatically and saved as phase-linked sources. Nothing runs without the user's approval.
-- **Insights → facts** (`static/evidence.js`, `routes/evidence.py`, `services/evidence_service.py`): below each phase write-up, the phase's conclusions and facts with their sources, Reject / Restore, and a fact search box. Built as DOM nodes with `textContent` only; links only for http/https.
+- **Insights → facts** (`static/evidence.js`, `routes/evidence.py`, `services/evidence_service.py`): below each phase write-up, the phase's conclusions and facts with their sources, Reject / Restore, and a fact search box. Facts show newest first, the newest 10 in view and the rest folded under "Show n more" (a "Based on facts" link opens the fold it needs). Built as DOM nodes with `textContent` only; links only for http/https.
 - Chat uses Server-Sent Events (`text/event-stream`) for real-time LLM streaming
 
 ### Data Model

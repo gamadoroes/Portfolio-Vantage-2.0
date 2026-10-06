@@ -141,6 +141,123 @@ test('the open state is kept apart for each phase', () => {
     assert.deepStrictEqual(['1', '2', '3'].map(key => state.get(key)), [false, false, true]);
 });
 
+// ---- long fact lists fold to the newest 10 ----
+// The server lists facts oldest first (ORDER BY id); a phase with 25 facts has ids 1..25.
+const manyFacts = n => Array.from({ length: n }, (_, i) => fact({ id: i + 1, claim: `Claim ${i + 1}` }));
+const byClass = (node, cls) => all(node, n => n.className === cls);
+const factIds = node => all(node, n => n.tagName === 'LI' && /^ev-fact/.test(n.className)).map(n => Number(n.getAttribute('id').replace('ev-fact-', '')));
+const visibleFactIds = node => factIds(node).filter(id => !byClass(node, 'ev-more').some(box => factIds(box).includes(id)));
+
+test('25 facts show the newest 10 first and fold the other 15 under Show 15 more', () => {
+    const node = E.phaseEvidenceNode(doc, { facts: manyFacts(25), conclusions: [] });
+    assert(node.textContent.includes('Facts (25)'));
+    const [more] = byClass(node, 'ev-more');
+    assert.strictEqual(more.tagName, 'DETAILS');
+    assert.strictEqual(more.children[0].tagName, 'SUMMARY');
+    assert.strictEqual(more.children[0].textContent, 'Show 15 more');
+    assert.deepStrictEqual(factIds(more), [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);   // the rest, still newest first
+    assert.deepStrictEqual(visibleFactIds(node), [25, 24, 23, 22, 21, 20, 19, 18, 17, 16]);       // the box sits after these
+    assert.strictEqual(more.getAttribute('open'), null);                                           // folded by default
+});
+test('the folded box follows the visible facts, and each fact still has its Reject button', () => {
+    const node = E.phaseEvidenceNode(doc, { facts: manyFacts(25), conclusions: [] });
+    const [more] = byClass(node, 'ev-more');
+    assert.strictEqual(more.parentNode, node);
+    assert.strictEqual(node.children[node.children.indexOf(more) - 1].className, 'ev-list');
+    assert.strictEqual(tagged(more, 'button').length, 15);
+    assert.deepStrictEqual(Array.from(new Set(tagged(more, 'button').map(b => b.getAttribute('data-ev-act')))), ['reject']);
+});
+test('10 facts or fewer are all shown, newest first, with no folded box', () => {
+    [1, 3, 10].forEach(n => {
+        const node = E.phaseEvidenceNode(doc, { facts: manyFacts(n), conclusions: [] });
+        assert.strictEqual(byClass(node, 'ev-more').length, 0, `${n} facts`);
+        assert.deepStrictEqual(factIds(node), Array.from({ length: n }, (_, i) => n - i), `${n} facts`);
+    });
+    const eleven = E.phaseEvidenceNode(doc, { facts: manyFacts(11), conclusions: [] });
+    assert.strictEqual(byClass(eleven, 'ev-more')[0].children[0].textContent, 'Show 1 more');
+});
+test('newest first goes by fact number, whatever order the list arrives in', () => {
+    const shuffled = [fact({ id: 7 }), fact({ id: 30 }), fact({ id: 2 })];
+    assert.deepStrictEqual(factIds(E.phaseEvidenceNode(doc, { facts: shuffled, conclusions: [] })), [30, 7, 2]);
+});
+test('only active facts are counted and folded; rejected ones stay in Show rejected, in their old order', () => {
+    const facts = manyFacts(12).concat([fact({ id: 13, claim: 'Old claim', status: 'rejected' }), fact({ id: 14, claim: 'Older claim', status: 'rejected' })]);
+    const node = E.phaseEvidenceNode(doc, { facts, conclusions: [] });
+    assert(node.textContent.includes('Facts (12)'));
+    assert.strictEqual(byClass(node, 'ev-more')[0].children[0].textContent, 'Show 2 more');
+    const [rejected] = byClass(node, 'ev-rejected');
+    assert(rejected.textContent.includes('Show rejected (2)'));
+    assert.deepStrictEqual(factIds(rejected), [13, 14]);
+    assert.strictEqual(byClass(node, 'ev-more').filter(m => factIds(m).includes(13)).length, 0);
+});
+test('conclusions stay fully visible however many facts there are', () => {
+    const conclusions = Array.from({ length: 5 }, (_, i) => conclusion({ id: i + 1, text: `Conclusion ${i + 1}` }));
+    const node = E.phaseEvidenceNode(doc, { facts: manyFacts(25), conclusions });
+    const [more] = byClass(node, 'ev-more');
+    assert.strictEqual(all(node, n => n.className === 'ev-concl').length, 5);
+    assert.strictEqual(all(more, n => n.className === 'ev-concl').length, 0);
+});
+test('search results are not folded', () => {
+    const node = E.searchResultsNode(doc, manyFacts(25), 'claim');
+    assert.strictEqual(byClass(node, 'ev-more').length, 0);
+    assert.strictEqual(tagged(node, 'li').length, 25);
+});
+test('a link to a fact that is folded away opens the folded box (and one to a visible fact leaves it shut)', () => {
+    const node = E.phaseEvidenceNode(doc, { facts: manyFacts(25), conclusions: [conclusion({ fact_ids: [3, 25] })] });
+    const [more] = byClass(node, 'ev-more');
+    const find = id => all(node, n => n.getAttribute('id') === `ev-fact-${id}`)[0];
+    E.openFoldedBoxes(find(25));
+    assert.notStrictEqual(more.open, true);
+    E.openFoldedBoxes(find(3));
+    assert.strictEqual(more.open, true);
+});
+test('a link to a rejected fact still opens Show rejected, and only that box', () => {
+    const facts = manyFacts(25).concat([fact({ id: 26, status: 'rejected' })]);
+    const node = E.phaseEvidenceNode(doc, { facts, conclusions: [] });
+    const [more] = byClass(node, 'ev-more');
+    const [rejected] = byClass(node, 'ev-rejected');
+    E.openFoldedBoxes(all(node, n => n.getAttribute('id') === 'ev-fact-26')[0]);
+    assert.strictEqual(rejected.open, true);
+    assert.notStrictEqual(more.open, true);
+});
+test('Show n more stays open or closed as the person left it, per phase, apart from Show rejected', () => {
+    const data = { facts: manyFacts(25).concat([fact({ id: 26, status: 'rejected' })]), conclusions: [] };
+    const rejected = E.createOpenState(), more = E.createOpenState();
+    const draw = key => E.phaseEvidenceNode(doc, data, rejected.get(key), more.get(key));
+    const moreBox = key => byClass(draw(key), 'ev-more')[0];
+    assert.strictEqual(moreBox('4').getAttribute('open'), null);        // folded by default
+    more.set('4', true);                                                // the person opens it, then rejects something
+    assert.notStrictEqual(moreBox('4').getAttribute('open'), null);     // the re-render keeps it open
+    assert.strictEqual(byClass(draw('4'), 'ev-rejected')[0].getAttribute('open'), null);   // Show rejected did not follow it
+    assert.strictEqual(moreBox('5').getAttribute('open'), null);        // another phase is not affected
+    more.set('4', false);
+    assert.strictEqual(moreBox('4').getAttribute('open'), null);        // closing is remembered too
+});
+test("the controller remembers each phase's Show n more box across a re-render and forgets it on a project change", async () => {
+    const page = makePage(['4', '5']); const env = makeEnv(page); const screen = E.createController(env);
+    const answer = { success: true, phases: { 4: { facts: manyFacts(25), conclusions: [] }, 5: { facts: manyFacts(25), conclusions: [] } } };
+    const moreBoxes = () => page.slots.map(slot => byClass(slot, 'ev-more')[0]);
+    const isOpen = () => moreBoxes().map(box => box.getAttribute('open') !== null);
+    screen.renderAll('P');
+    env.requests[0].resolve(answer); await flush();
+    assert.deepStrictEqual(isOpen(), [false, false]);
+    screen.rememberMoreBox('4', true);                                   // the person opened phase 4's box
+    screen.renderAll('P');                                               // a reject or restore re-renders
+    env.requests[1].resolve(answer); await flush();
+    assert.deepStrictEqual(isOpen(), [true, false]);
+    screen.rememberRejectedBox('5', true);                               // Show rejected is a separate memory
+    screen.renderAll('P'); env.requests[2].resolve(answer); await flush();
+    assert.deepStrictEqual(isOpen(), [true, false]);
+    screen.renderAll('Other');                                           // a different project starts folded
+    env.requests[3].resolve(answer); await flush();
+    assert.deepStrictEqual(isOpen(), [false, false]);
+});
+test('folded facts are still set as text, not markup', () => {
+    const node = E.phaseEvidenceNode(doc, { facts: manyFacts(12).map(f => Object.assign(f, { claim: '<img src=x onerror=alert(1)>' })), conclusions: [] });
+    assert.strictEqual(tagged(node, 'img').length, 0);
+    assert(byClass(node, 'ev-more')[0].textContent.includes('<img src=x onerror=alert(1)>'));
+});
+
 test('a search that finishes after a project change paints nothing', async () => {
     const page = makePage(['4']); const env = makeEnv(page); const screen = E.createController(env);
     screen.renderAll('Old');

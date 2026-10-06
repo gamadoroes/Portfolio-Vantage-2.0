@@ -1353,5 +1353,5 @@ mark.selection-highlight { background: rgba(255, 138, 0, 0.25); border-bottom: 2
 .ev-empty { color: #666; font-size: 0.85rem; margin: 0; }
 .ev-btn { font-size: 0.75rem; padding: 0.15rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; margin-left: auto; }
 .ev-btn:hover { border-color: var(--oes-ink); }
-.ev-rejected summary { cursor: pointer; font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
+.ev-rejected summary, .ev-more summary { cursor: pointer; font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
 .ev-results { margin-top: 0.5rem; }
