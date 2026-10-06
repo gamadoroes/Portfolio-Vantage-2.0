@@ -134,7 +134,7 @@ def test_draft_creates_cards_and_explains_itself(client, monkeypatch):
     block = _Block("create_research_task", {"reason": "Empty", "tasks": [
         {"phase_key": "1", "title": "Landscape", "research_method": "TARGETED_WEB", "rationale": "Nothing yet"}]})
     fake = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: SimpleNamespace(content=[block])))
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: fake)
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key, **options: fake)
     body = client.post("/api/board/draft", json={"project": "P"}).get_json()
     assert body["success"] is True
     assert body["note"].startswith("Drafted 1 new research")
@@ -176,7 +176,7 @@ def test_extract_facts_saves_facts_and_explains_itself(client, monkeypatch):
                                                         "source_url": "https://deakin.example/fees"}]})
     calls = []
     fake = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: calls.append(kw) or SimpleNamespace(content=[block])))
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: fake)
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key, **options: fake)
     resp = client.post(f"/api/board/cards/{card_id}/extract-facts", json={"project": "P"})
     body = resp.get_json()
     assert resp.status_code == 200
@@ -199,7 +199,7 @@ def test_extract_facts_when_claude_is_unreachable_says_so_plainly_and_keeps_the_
 
     def down(**kwargs):
         raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: SimpleNamespace(messages=SimpleNamespace(create=down)))
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key, **options: SimpleNamespace(messages=SimpleNamespace(create=down)))
     resp = client.post(f"/api/board/cards/{card_id}/extract-facts", json={"project": "P"})
     assert resp.status_code == 503
     assert resp.get_json()["error"] == "Couldn't take facts from this report just now. Try again shortly."

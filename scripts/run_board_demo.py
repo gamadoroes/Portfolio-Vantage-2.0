@@ -59,7 +59,7 @@ def demo_facts():
 
 
 class FakeAnthropic:
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, **options):  # options: the time limit and retries the real client takes
         self.messages = self
 
     def create(self, **kwargs):

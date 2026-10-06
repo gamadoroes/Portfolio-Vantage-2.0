@@ -219,7 +219,9 @@ def app_context(pid):
 
 
 def _install(monkeypatch, client):
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
+    client.built_with = []
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic",
+                        lambda api_key, **options: client.built_with.append(options) or client)
     return client
 
 
@@ -252,6 +254,7 @@ def test_extract_saves_facts_without_touching_the_review(app_context, pid, monke
     assert call["tool_choice"] == {"type": "tool", "name": "record_research_facts"}
     assert call["max_tokens"] == 6000
     assert "Deakin charges $3,000 per unit in 2026." in call["messages"][0]["content"]
+    assert client.built_with == [{"timeout": 240, "max_retries": 1}]  # the button's call has the same time limit
     child = next(r for r in tool_calls_repo.list_for_project(pid) if r["tool"] == "record_research_facts")
     assert (child["caller"], child["parent_call_id"]) == ("supervisor", result.call_id)
     assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)[:2]] == [

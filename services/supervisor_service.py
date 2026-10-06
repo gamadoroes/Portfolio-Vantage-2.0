@@ -215,8 +215,9 @@ REVIEW_SYSTEM_PROMPT = (
     "something you were not shown."
 )
 
-def _client():
-    return anthropic.Anthropic(api_key=current_app.config["ANTHROPIC_API_KEY"])
+def _client(**options):
+    """The Claude client. Options (a time limit, a retry count) go straight to the SDK; drafting and review pass none."""
+    return anthropic.Anthropic(api_key=current_app.config["ANTHROPIC_API_KEY"], **options)
 
 
 def _tool_use(response, name=None):
@@ -249,6 +250,12 @@ DRAFTING_MENU = ("create_research_task", "no_action")
 REVIEW_MENU = ("evaluate_research_output",)
 EXTRACT_MENU = ("record_research_facts",)
 EXTRACT_MAX_TOKENS = 6000  # room for up to 25 facts and 3 conclusions
+# The SDK's own defaults (10 minutes, 2 retries) could keep one paid call alive for 30 minutes, longer than
+# research_runs_repo.STALE_EXTRACTION_MINUTES (15), after which the run's claim counts as dead and "Extract facts"
+# comes back while the first call is still running. This limit keeps the worst case (the call plus one retry,
+# 240 s x 2 = 8 minutes) well inside that window. If you raise either number, keep that product under it.
+EXTRACT_TIMEOUT_SECONDS = 240
+EXTRACT_MAX_RETRIES = 1
 # The extraction reads far more of the report than the review may (the review's view is set in review_limits.py).
 MAX_EXTRACT_REPORT_CHARS = 60000
 
@@ -506,7 +513,7 @@ def extract_facts(project_name, card_id, parent_call_id=None):
     extract_research_facts has already claimed the run; this raises on any failure so the tool can release it."""
     card = research_work_items_repo.get(card_id)
     run = research_runs_repo.find_latest_for_work_item(card_id)
-    response = _client().messages.create(
+    response = _client(timeout=EXTRACT_TIMEOUT_SECONDS, max_retries=EXTRACT_MAX_RETRIES).messages.create(
         model=current_app.config["ANTHROPIC_MODEL"],
         max_tokens=EXTRACT_MAX_TOKENS,
         system=EXTRACT_SYSTEM_PROMPT,

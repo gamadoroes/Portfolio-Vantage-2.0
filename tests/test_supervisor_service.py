@@ -269,7 +269,10 @@ def drafted(monkeypatch):
 
 
 def _install(monkeypatch, client):
-    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic", lambda api_key: client)
+    # Each time the service builds a client, the options it passed (beyond the key) are recorded on the fake.
+    client.built_with = []
+    monkeypatch.setattr(supervisor_service.anthropic, "Anthropic",
+                        lambda api_key, **options: client.built_with.append(options) or client)
     return client
 
 
@@ -708,10 +711,26 @@ def test_a_review_is_followed_by_one_extraction_that_reads_the_whole_report(temp
     assert "LATE DETAIL" in extract_call["messages"][0]["content"]
     assert len(evidence_repo.list_facts(pid)) == 2
     assert research_runs_repo.get(f"run_{card_id}")["facts_extracted_at"]
+    # Only the paid extraction call gets a time limit and fewer retries; the review client is built as before.
+    assert client.built_with == [{}, {"timeout": 240, "max_retries": 1}]
     # No "You extracted facts" line for the automatic step.
     assert [d["decision_type"] for d in agent_decisions_repo.list_for_project(pid)] == ["facts_recorded", "review_outcome"]
     texts = [a["text"] for a in board_service.get_board_state("P")["activity"]]
     assert texts[0] == 'Supervisor saved 2 facts and 1 conclusion from "Fees".'
+
+
+def test_the_drafting_client_is_built_without_a_time_limit(temp_db, app_context, drafted, monkeypatch):
+    projects_repo.get_or_create_id("P")
+    client = _install(monkeypatch, _FakeClient([_Block("no_action", {"reason": "Nothing to add"})]))
+    supervisor_service.draft_researches("P")
+    assert client.built_with == [{}]
+
+
+def test_the_extraction_time_limit_ends_well_inside_the_stale_claim_window():
+    # A slow call must give up before the 15-minute window in which another click could start a second paid call.
+    assert supervisor_service.EXTRACT_TIMEOUT_SECONDS == 240 and supervisor_service.EXTRACT_MAX_RETRIES == 1
+    worst_case = supervisor_service.EXTRACT_TIMEOUT_SECONDS * (supervisor_service.EXTRACT_MAX_RETRIES + 1)
+    assert worst_case < research_runs_repo.STALE_EXTRACTION_MINUTES * 60
 
 
 def test_a_failed_review_triggers_no_extraction(temp_db, app_context, monkeypatch):
