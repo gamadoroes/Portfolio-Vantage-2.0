@@ -288,14 +288,50 @@ def test_generate_adds_the_briefing_after_the_guidance_and_before_the_users_inst
 def test_generate_checks_for_a_running_generation_before_and_after_waiting_for_the_briefing():
     body = _between(_static("app.js"), "async function generatePhaseInsight(", "async function handleInsightResponse(")
     added = body.index("prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);")
-    check = "if (refuseIfRunning()) return;"
+    check = "if (refuseIfRunning()) return PHASE_GENERATION_REFUSED;"
     assert body.count(check) == 2
     first = body.index(check)
     second = body.index(check, first + 1)
     assert first < added < second                                           # before the wait, and again once it is over
     assert body.index("if (currentProject !== briefProject) {") < second
+    assert second < body.index("const genId = newGenerationId();")          # nothing is registered before the last look
     assert body.count("An insight generation is already running for this project.") == 1   # one message, one helper
     assert body.count("getActiveGenerationForProject(currentProject)") == 1
+
+
+def test_generate_checks_the_linked_files_before_it_fetches_the_briefing():
+    # A phase with no linked files alerts and stops; it must not ask the server for a briefing first.
+    body = _between(_static("app.js"), "async function generatePhaseInsight(", "async function handleInsightResponse(")
+    added = body.index("prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);")
+    assert body.count("evidencePhaseBriefAddition(") == 1                   # still the one fetch
+    first_check = body.index("if (refuseIfRunning()) return PHASE_GENERATION_REFUSED;")
+    scoping = body.index("normalizeInsightsData(currentInsightsData, getAvailableSourceFiles(), getFileIndexIdToName());")
+    for alert in ("Phase 7 requires completed summaries in Phases 1-6. Generate those first.",
+                  "requires at least one linked source file."):
+        assert first_check < scoping < body.index(alert) < added            # each way out of the scoping block comes first
+    # The briefing still sits after the guidance and before the user's instructions, and the project guard follows it.
+    assert added < body.index("if (currentProject !== briefProject) {") < body.index("USER INSTRUCTIONS:")
+    assert body.index("USER INSTRUCTIONS:") < body.index("const genId = newGenerationId();")
+
+
+def test_generate_says_when_it_was_refused_because_another_generation_is_running():
+    source = _static("app.js")
+    assert "const PHASE_GENERATION_REFUSED = 'refused';" in source
+    body = _between(source, "async function generatePhaseInsight(", "async function handleInsightResponse(")
+    assert body.count("return PHASE_GENERATION_REFUSED;") == 2             # the early and the late look, nothing else
+    assert "const refuseIfRunning = () => {" in body
+
+
+def test_refresh_all_stops_at_the_first_refusal_with_one_honest_status_line():
+    body = _between(_static("app.js"), "async function generateInsights(", "async function generateCompetitorLandscape(")
+    stop = "if (outcome === PHASE_GENERATION_REFUSED) { stopRefresh(); return; }"
+    assert body.count(stop) == 2                                            # the six phases, and the options report
+    assert "const outcome = await generatePhaseInsight(phaseKey, userInstructions);" in body
+    assert "const outcome = await generatePhaseInsight('7', userInstructions);" in body
+    assert "Refresh stopped: a phase is already being generated." in body
+    assert body.count("alert(") == 2                                        # the two it had; the refused phase alerts once
+    complete = body.index("`Refresh complete —")                            # a stopped batch never gets this far
+    assert body.index(stop) < body.rindex(stop) < complete
 
 
 def test_phase_7_keeps_the_markers_word_for_word_with_the_options_report():
@@ -316,3 +352,18 @@ def test_a_phase_card_marks_its_write_up_for_linking_and_shows_the_note_as_text(
 
 def test_the_note_reads_the_same_on_screen_and_in_the_word_report():
     assert f"const NOT_CITED_NOTE = '{evidence_service.NOT_CITED_NOTE}';" in _static("evidence.js")
+
+
+def test_the_phase_editor_puts_citation_markers_back_after_turndown_has_escaped_them():
+    # Turndown writes [F12] as \[F12\]; the helper in evidence.js turns real markers back, and the save goes through it.
+    source = _static("app.js")
+    body = _between(source, "function htmlToMarkdown(", "function getTurndownService(")
+    core = body.index('let markdown = toMarkdownFromHtmlCore(container.innerHTML || "");')
+    restore = ("if (typeof evidenceUnescapeCitationMarkers === 'function') "
+               "markdown = evidenceUnescapeCitationMarkers(markdown);")           # app.js still works without evidence.js
+    assert core < body.index(restore)
+    assert "window.evidenceUnescapeCitationMarkers = unescapeCitationMarkers;" in _static("evidence.js")
+    # The editor's Update Phase save reads the editor through htmlToMarkdown (via getOutputContent), so it is covered.
+    save = _between(source, "async function updatePhaseFromEditor(", "async function renameCurrentChapterTile(")
+    assert "content = getOutputContent();" in save
+    assert "htmlToMarkdown(editor.innerHTML)" in _between(source, "function getOutputContent(", "function copyOutputToClipboard(")

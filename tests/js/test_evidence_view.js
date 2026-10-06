@@ -525,6 +525,47 @@ test('a past Insights version (no slots) or a failed load leaves the markers as 
     assert.strictEqual(citeLinks(box).length, 0);
 });
 
+// ---- the phase editor's save (Turndown writes \[F12\]; the saved text must keep [F12]) ----
+
+test('escaped citation markers come back as markers', () => {
+    assert.strictEqual(E.unescapeCitationMarkers('Fees rose \\[F12\\] and \\[C4\\].'), 'Fees rose [F12] and [C4].');
+    assert.strictEqual(E.unescapeCitationMarkers('\\[F1\\]'), '[F1]');
+    assert.strictEqual(E.unescapeCitationMarkers('Up \\[F123456789\\]'), 'Up [F123456789]');       // nine digits is the most
+});
+test('several escaped markers in a row, in lists and in bold, all come back', () => {
+    assert.strictEqual(E.unescapeCitationMarkers('Claim \\[F3\\] \\[F12\\]\\[C4\\] \\[F3\\]'), 'Claim [F3] [F12][C4] [F3]');
+    assert.strictEqual(E.unescapeCitationMarkers('*   Point \\[F7\\]\n\n**Bold \\[C2\\]**'), '*   Point [F7]\n\n**Bold [C2]**');
+});
+test('an unescaped marker, and text with no markers, are returned as they were', () => {
+    assert.strictEqual(E.unescapeCitationMarkers('Already [F12] fine.'), 'Already [F12] fine.');
+    assert.strictEqual(E.unescapeCitationMarkers(''), '');
+    assert.strictEqual(E.unescapeCitationMarkers('Plain text.'), 'Plain text.');
+});
+test('escaped brackets that are not a marker stay escaped', () => {
+    const same = [
+        '\\[link\\](x)', '\\[F\\]', '\\[f12\\]', '\\[X1\\]', '\\[F12', 'F12\\]', '\\[F1x\\]',
+        '\\[F1234567890\\]',            // ten digits: not an id
+        '\\[F\uff11\uff12\\]',          // fullwidth digits
+        '\\[F\u0663\\]',                // Arabic-Indic digit
+        '\\[F-1\\]', '\\[F 12\\]', '\\[F12 \\]', '\\[F12\\\\]',
+    ];
+    same.forEach(text => assert.strictEqual(E.unescapeCitationMarkers(text), text, text));
+    assert.strictEqual(E.unescapeCitationMarkers('1\\[2\\] and \\[F12\\]'), '1\\[2\\] and [F12]');   // only the marker changes
+});
+test('what Turndown 7.1.2 writes for a card with markers comes back as the markers it was', () => {
+    // Strings captured from turndown@7.1.2 (the version index.html loads), run on the editor's HTML.
+    const written = 'Fees rose \\[F3\\] and \\[F12\\] \\[C4\\]. A \\[link\\](x) and 1\\[2\\].';
+    assert.strictEqual(E.unescapeCitationMarkers(written), 'Fees rose [F3] and [F12] [C4]. A \\[link\\](x) and 1\\[2\\].');
+});
+test('odd input is returned as an empty string, not an error', () => {
+    [null, undefined, 42, {}, []].forEach(x => assert.strictEqual(E.unescapeCitationMarkers(x), ''));
+});
+test('it undoes exactly what the card reads back: the restored marker is one the card links', () => {
+    const restored = E.unescapeCitationMarkers('See \\[F12\\].');
+    assert.strictEqual(E.hasCitationMarkers('See \\[F12\\].'), false);   // the escaped form is what broke the card
+    assert.strictEqual(E.hasCitationMarkers(restored), true);
+});
+
 (async () => {
 let failed = 0;
 for (const [name, fn] of tests) {

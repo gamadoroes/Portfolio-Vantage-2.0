@@ -267,6 +267,14 @@
             linkCitations(doc, node, index);
         });
     }
+    // The phase editor turns its HTML back into Markdown with Turndown, which escapes every square bracket: [F12]
+    // comes out as \[F12\]. A marker written that way is no marker (not on the card, not in the Word report's
+    // Sources), so the editor's save puts the brackets of real markers back (digits 1-9 only, as everywhere else).
+    // Every other escaped bracket is left as Turndown wrote it.
+    function unescapeCitationMarkers(markdown) {
+        if (typeof markdown !== 'string') return '';
+        return markdown.replace(/\\\[([FC])([0-9]{1,9})\\\]/g, '[$1$2]');
+    }
     function citationFromTarget(node) {
         for (let n = node; n; n = n.parentNode) {
             if (n.nodeType === 1 && String(n.tagName || '').toUpperCase() === 'A' && ownCitation(n)) return n;
@@ -374,6 +382,7 @@
         safeUrl, factNode, conclusionNode, phaseEvidenceNode, searchResultsNode, createOpenState, createController, openFoldedBoxes,
         briefPromptAddition, phaseBriefAddition,
         NOT_CITED_NOTE, hasCitationMarkers, notCitedNote, citationIndex, linkCitations, handleCitationClick,
+        unescapeCitationMarkers,
     };
     if (typeof module !== 'undefined' && module.exports) { module.exports = pure; return; }
 
@@ -427,4 +436,5 @@
     window.evidenceResetSearch = screen.resetSearch;
     window.evidencePhaseBriefAddition = (project, phaseKey) => phaseBriefAddition(call, project, phaseKey);
     window.evidenceNotCitedNote = notCitedNote;
+    window.evidenceUnescapeCitationMarkers = unescapeCitationMarkers;
 })();

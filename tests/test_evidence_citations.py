@@ -150,8 +150,55 @@ def test_a_huge_rejected_list_is_clipped_and_the_brief_still_fits(pid):
     assert len(brief["text"]) <= evidence_service.MAX_PHASE_BRIEF_CHARS
     rejected = brief["text"].split("\n\n")[2].split("\n")
     assert rejected[0] == "# REJECTED — DO NOT USE" and rejected[-1].endswith("more rejected facts not shown")
-    assert brief["text"].endswith(evidence_service.BRIEF_RULES)
+    assert brief["text"].endswith(evidence_service.BRIEF_RULES_NO_FACTS)
     assert brief["rejected_count"] == 100                    # the count is of every rejected fact, shown or cut
+
+
+# ---- the rules when a phase has nothing checked to cite ----
+
+def test_a_phase_with_only_rejected_facts_is_not_told_to_cite_markers(pid):
+    card = _card(pid)
+    evidence_repo.set_fact_status(_fact(pid, card, "Wrong claim"), "rejected")
+    brief = evidence_service.phase_brief(pid, "1")
+    assert (brief["fact_count"], brief["conclusion_count"], brief["rejected_count"]) == (0, 0, 1)
+    rules = brief["text"].split("\n\n")[-1]
+    assert rules == evidence_service.BRIEF_RULES_NO_FACTS
+    assert rules.split("\n")[:2] == [
+        "RULES:",
+        "- There are no checked facts for this phase: mark every claim taken from the attached reports "
+        "\"(not fact-checked)\"."]
+    assert "Cite every factual claim" not in brief["text"]
+    assert "[F#]" not in rules and "[C#]" not in rules               # nothing to cite, so no marker to ask for
+    assert "Never use a fact listed under REJECTED" in rules          # the rest of the rules stay
+    assert "exactly as written" in rules
+
+
+def test_a_phase_with_facts_or_conclusions_keeps_the_citing_rules(pid):
+    _fact(pid, _card(pid), "Kept claim")
+    assert evidence_service.phase_brief(pid, "1")["text"].endswith(evidence_service.BRIEF_RULES)
+    # Every fact rejected but the conclusion still active: it can be cited, so the citing rules stay.
+    card = _card(pid, phase="2")
+    fact = _fact(pid, card, "Phase two claim", phase="2")
+    evidence_repo.create_conclusion(pid, "2", card, "Still a conclusion", [fact])
+    evidence_repo.set_fact_status(fact, "rejected")
+    brief = evidence_service.phase_brief(pid, "2")
+    assert (brief["fact_count"], brief["conclusion_count"], brief["rejected_count"]) == (0, 1, 1)
+    assert brief["text"].endswith(evidence_service.BRIEF_RULES)
+
+
+def test_a_phase_with_nothing_at_all_also_gets_the_no_facts_rules(pid):
+    assert evidence_service.phase_brief(pid, "3")["text"].endswith(evidence_service.BRIEF_RULES_NO_FACTS)
+    assert evidence_service.phase_brief(None, "3")["text"].endswith(evidence_service.BRIEF_RULES_NO_FACTS)
+
+
+def test_the_no_facts_rules_still_fit_the_budget_with_a_huge_rejected_list(pid):
+    card = _card(pid)
+    for n in range(300):
+        evidence_repo.set_fact_status(_fact(pid, card, f"Rejected {n:03d} " + "r" * 400), "rejected")
+    brief = evidence_service.phase_brief(pid, "1")
+    assert len(brief["text"]) <= evidence_service.MAX_PHASE_BRIEF_CHARS
+    assert brief["text"].endswith(evidence_service.BRIEF_RULES_NO_FACTS)
+    assert "more rejected facts not shown" in brief["text"]
 
 
 # ---- the rejected count (tells Generate that a phase with no usable facts still has claims not to use) ----
@@ -192,7 +239,7 @@ def test_a_phase_with_only_rejected_facts_still_lists_them_as_not_to_use(pid):
     sections = brief["text"].split("\n\n")
     assert sections[0] == "# CHECKED FACTS FOR PHASE 1 (newest first)\n(none)"
     assert sections[2].split("\n") == ["# REJECTED — DO NOT USE", "- First wrong claim", "- Second wrong claim"]
-    assert brief["text"].endswith(evidence_service.BRIEF_RULES)
+    assert brief["text"].endswith(evidence_service.BRIEF_RULES_NO_FACTS)
 
 
 # ---- the Sources list ----
@@ -265,6 +312,79 @@ def test_the_sources_list_as_markdown(pid):
     fact = _fact(pid, _card(pid), "Fees", source=("https://a.example", "Page A", None))
     assert evidence_service.sources_markdown(f"Dear [F{fact}].", evidence_service.citation_index("P")) == (
         f"\n\n## Sources\n\n- F{fact} — Page A — https://a.example")
+
+
+def _without_escapes(text):
+    """What is left once every backslash-escaped character is taken out: what a Markdown reader sees as syntax."""
+    return re.sub(r"\\.", "", text)
+
+
+def _as_the_reader_shows_it(markdown_line):
+    """A Markdown line with its backslash escapes resolved, as a reader displays it (only the specials we escape)."""
+    return re.sub(r"\\([\\\[\]()!<>*_`])", r"\1", markdown_line)
+
+
+def test_hostile_titles_publishers_and_conclusions_carry_no_markdown_syntax_into_the_options_report(pid):
+    image = "![x](http://evil.example/img.png)"
+    link = "[click here](http://evil.example)"
+    card = _card(pid, title=f"Report {link}")
+    fact = _fact(pid, card, "A claim", as_of=f"2026 {image}",
+                 source=("https://a.example/p", f"Title {image} <img src=x onerror=alert(1)>", f"Publisher {link} **bold** _it_ `code`"))
+    bare = _fact(pid, card, "Another claim")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, f"Conclusion {image} {link} <b>x</b>", [fact])
+    markdown = evidence_service.sources_markdown(f"[F{fact}] [C{conclusion}] [F{bare}]", evidence_service.citation_index("P"))
+    assert "![x](" not in markdown and "[click here](" not in markdown        # nothing a reader could turn into an image or link
+    items = markdown.split("\n\n## Sources\n\n")[1].split("\n")
+    assert len(items) == 3
+    for item in items:
+        seen = _without_escapes(item)
+        assert not any(special in seen for special in "[]<>!*_`"), item
+        assert "](" not in seen
+    # Our own parentheses, the part before the title and the page address are still there.
+    assert items[0].startswith(f"- F{fact} — Publisher ") and items[0].endswith(" — https://a.example/p")
+    assert items[1].startswith(f"- C{conclusion} — Conclusion: Conclusion ") and items[1].endswith(f" (based on F{fact})")
+    assert items[2] == f"- F{bare} — Research report: Report \\[click here\\]\\(http://evil.example\\)"
+
+
+def test_the_word_report_list_stays_plain_text_with_nothing_escaped(pid):
+    link = "[click here](http://evil.example)"
+    card = _card(pid, title="Report")
+    fact = _fact(pid, card, "A claim", source=("https://a.example/p", f"Title {link}", "Pub_lisher *x*"))
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, f"Conclusion {link} <b>", [fact])
+    lines = evidence_service.sources_lines(f"[F{fact}] [C{conclusion}]", evidence_service.citation_index("P"))
+    assert lines == [
+        f"F{fact} — Pub_lisher *x* — Title {link} — https://a.example/p",
+        f"C{conclusion} — Conclusion: Conclusion {link} <b> (based on F{fact})",
+    ]
+    assert "\\" not in "".join(lines)
+
+
+def test_a_normal_title_reads_the_same_once_the_reader_has_rendered_it(pid):
+    card = _card(pid, title="Fees (2026) for the unit_price")
+    fact = _fact(pid, card, "A claim", as_of="2026",
+                 source=("https://a.example/page_(1)?q=a_b&x=1", "Deakin fees (2026) - cost_per_unit * 3!", "Deakin University [Online]"))
+    bare = _fact(pid, card, "Another claim", as_of="2025")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "Fees > costs (see the 'unit_price' page)", [fact])
+    text = f"[F{fact}] [C{conclusion}] [F{bare}]"
+    index = evidence_service.citation_index("P")
+    items = evidence_service.sources_markdown(text, index).split("\n\n## Sources\n\n")[1].split("\n")
+    assert [_as_the_reader_shows_it(item) for item in items] == [
+        f"- {line}" for line in evidence_service.sources_lines(text, index)]
+    assert "\\" in items[0]                                                    # it was escaped: the match above is not trivial
+
+
+def test_a_page_address_with_link_characters_cannot_start_a_link_or_image_but_a_normal_one_is_untouched(pid):
+    card = _card(pid)
+    sneaky = _fact(pid, card, "A claim", source=("https://a.example/ok ![x](http://evil.example/i.png) <b>", "T", None))
+    normal = _fact(pid, card, "Another claim", source=("https://b.example/page_(1)?q=a_b&x=1#top", "T", None))
+    text = f"[F{sneaky}] [F{normal}]"
+    index = evidence_service.citation_index("P")
+    first, second = evidence_service.sources_markdown(text, index).split("\n\n## Sources\n\n")[1].split("\n")
+    assert "[" not in first and "]" not in first and "<" not in first and ">" not in first
+    assert "![x](" not in first and first.endswith("%5Bx%5D(http://evil.example/i.png) %3Cb%3E")
+    assert second.endswith(" — https://b.example/page_(1)?q=a_b&x=1#top")      # a real address reads exactly as before
+    plain = evidence_service.sources_lines(text, index)
+    assert plain[0].endswith("https://a.example/ok ![x](http://evil.example/i.png) <b>")   # Word keeps what was saved
 
 
 def test_only_plain_ascii_digit_markers_count_and_a_huge_number_cannot_raise():

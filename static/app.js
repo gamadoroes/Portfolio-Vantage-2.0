@@ -1357,11 +1357,19 @@ async function generateInsights(userInstructions) {
     showInsightsIndicator('Running linked phases...');
     if (statusEl) statusEl.textContent = `Running linked phases (${runnablePhaseKeys.join(', ')})...`;
 
+    // A phase refused because another generation is running has already told the person (one alert). The rest would
+    // be refused the same way, so the batch stops there and says so, rather than alerting for every phase and then
+    // reporting "Refresh complete".
+    const stopRefresh = () => {
+        if (statusEl) statusEl.innerHTML = `<span style="color:#dc3545;">Refresh stopped: a phase is already being generated.</span>`;
+    };
+
     try {
         for (const phaseKey of runnablePhaseKeys) {
             // Do not continue batch if user switched project mid-run.
             if (!currentProject) break;
-            await generatePhaseInsight(phaseKey, userInstructions);
+            const outcome = await generatePhaseInsight(phaseKey, userInstructions);
+            if (outcome === PHASE_GENERATION_REFUSED) { stopRefresh(); return; }
             if (statusEl && /cancelled/i.test(statusEl.textContent || statusEl.innerText || '')) {
                 return;
             }
@@ -1369,7 +1377,8 @@ async function generateInsights(userInstructions) {
 
         // Run Phase 7 consolidation if there is enough prior phase output.
         if (buildPriorPhaseContextForPhase7()) {
-            await generatePhaseInsight('7', userInstructions);
+            const outcome = await generatePhaseInsight('7', userInstructions);
+            if (outcome === PHASE_GENERATION_REFUSED) { stopRefresh(); return; }
         }
 
         if (statusEl) statusEl.innerHTML = `Refresh complete — ${new Date().toLocaleString()}`;
@@ -1442,6 +1451,10 @@ CRITICAL INSTRUCTIONS:
         if(statusEl) statusEl.innerHTML = `<span style="color:#dc3545;">Error: ${e.message}</span>`;
     }
 }
+
+// What generatePhaseInsight answers when it did not start because another generation is already running for the
+// project. Refresh All stops its batch on it; any other way out of generatePhaseInsight answers nothing.
+const PHASE_GENERATION_REFUSED = 'refused';
 
 async function generatePhaseInsight(phaseKey, userInstructions) {
     const def = PHASE_DEFINITIONS[phaseKey];
@@ -1719,8 +1732,8 @@ CRITICAL INSTRUCTIONS:
 3. Return Markdown only (no JSON).
 4. If no reliable evidence exists in the provided sources, return exactly: MISSING`;
 
-    // Asked before the briefing is fetched, so a second click does not fetch it for nothing, and again once it has
-    // arrived, because another generation can start while it loads.
+    // Asked first, so a second click does nothing else, and again once the briefing has arrived, because another
+    // generation can start while it loads. Both ways out answer PHASE_GENERATION_REFUSED, so Refresh All can stop.
     const refuseIfRunning = () => {
         if (!getActiveGenerationForProject(currentProject)) return false;
         alert('An insight generation is already running for this project. Please wait for it to complete.');
@@ -1728,25 +1741,7 @@ CRITICAL INSTRUCTIONS:
         hideInsightsIndicator();
         return true;
     };
-
-    // Facts first (spec section 4): when this phase has checked facts, the server's facts briefing follows the
-    // guidance. A phase with no active or rejected facts, or a failed request, leaves the prompt exactly as before.
-    const briefProject = currentProject;
-    if (typeof evidencePhaseBriefAddition === 'function') {
-        if (refuseIfRunning()) return;
-        prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);
-        if (currentProject !== briefProject) {  // the person switched project while the briefing loaded
-            if (btn) { btn.innerText = "Generate"; btn.disabled = false; }
-            hideInsightsIndicator();
-            return;
-        }
-    }
-
-    if (userInstructions && userInstructions.trim()) {
-        prompt += `\n\nUSER INSTRUCTIONS:\n${userInstructions.trim()}`;
-    }
-
-    if (refuseIfRunning()) return;
+    if (refuseIfRunning()) return PHASE_GENERATION_REFUSED;
 
     // Enforce explicit phase scoping:
     // - Phases 1-6: must have linked source files.
@@ -1796,6 +1791,25 @@ CRITICAL INSTRUCTIONS:
             overrideFiles = linkedFiles;
         }
     }
+
+    // Facts first (spec section 4): when this phase has checked facts, the server's facts briefing follows the
+    // guidance. A phase with no active or rejected facts, or a failed request, leaves the prompt exactly as before.
+    // It is fetched only now, once the phase is known to be runnable, so a phase that stops above never asks for it.
+    const briefProject = currentProject;
+    if (typeof evidencePhaseBriefAddition === 'function') {
+        prompt += await evidencePhaseBriefAddition(briefProject, phaseKey);
+        if (currentProject !== briefProject) {  // the person switched project while the briefing loaded
+            if (btn) { btn.innerText = "Generate"; btn.disabled = false; }
+            hideInsightsIndicator();
+            return;
+        }
+    }
+
+    if (userInstructions && userInstructions.trim()) {
+        prompt += `\n\nUSER INSTRUCTIONS:\n${userInstructions.trim()}`;
+    }
+
+    if (refuseIfRunning()) return PHASE_GENERATION_REFUSED;
 
     const genId = newGenerationId();
     activeInsightGenerations[genId] = {
@@ -3232,6 +3246,8 @@ function htmlToMarkdown(html) {
     });
 
     let markdown = toMarkdownFromHtmlCore(container.innerHTML || "");
+    // Turndown escapes every square bracket, so a citation marker [F12] comes out as \[F12\] and stops being one.
+    if (typeof evidenceUnescapeCitationMarkers === 'function') markdown = evidenceUnescapeCitationMarkers(markdown);
     placeholders.forEach(({ token, markdown: tableMd }) => {
         const tokenRegex = new RegExp(`\\b${token}\\b`, 'g');
         markdown = markdown.replace(tokenRegex, `\n\n${tableMd}\n\n`);
