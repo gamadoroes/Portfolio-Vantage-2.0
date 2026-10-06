@@ -3,13 +3,13 @@ import re
 from datetime import datetime
 
 from docx import Document
-from docx.shared import Pt, Cm, Inches, RGBColor, Emu
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.section import WD_ORIENT
-from docx.oxml.ns import qn, nsdecls
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+from docx.shared import Cm, Pt, RGBColor
 
+from .evidence_service import NOT_CITED_NOTE, cited_markers, sources_lines
 
 # ---------------------------------------------------------------------------
 # Brand colours
@@ -720,6 +720,16 @@ def _add_phase_section(doc, phase_num, title, summary):
     _para(doc, "", space_after=8)
 
 
+def _add_citation_sources(doc, summary, citations):
+    """After a fact-cited phase: a "Cited sources" heading and one line per cited fact or conclusion (spec section 6)."""
+    lines = sources_lines(summary, citations)
+    if not lines:
+        return
+    _para(doc, "Cited sources", size=10, bold=True, colour=CLR_PRIMARY_TEXT, space_before=8, space_after=2)
+    for line in lines:
+        _para(doc, line, size=8, colour=CLR_DARK_GREY, space_before=1, space_after=1)
+
+
 # ---------------------------------------------------------------------------
 # Rating visuals (filled/unfilled blocks)
 # ---------------------------------------------------------------------------
@@ -812,8 +822,11 @@ def _add_completeness_summary(doc, data):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def generate_insights_report(data, project_name="Research Project"):
+def generate_insights_report(data, project_name="Research Project", citations=None):
     """Generate a professionally formatted Word document from insights JSON.
+
+    `citations` is evidence_service.citation_index(project): what each phase's [F#] / [C#] markers are looked up in
+    for its "Cited sources" list. None counts as a project with no facts (every marker then reads "(not found)").
 
     Returns an io.BytesIO buffer containing the .docx file.
     """
@@ -914,7 +927,10 @@ def generate_insights_report(data, project_name="Research Project"):
                   "to generate targeted content for this section.",
                   size=9, italic=True, colour=CLR_DARK_GREY, space_before=8, space_after=12)
         else:
+            if not cited_markers(summary):
+                _para(doc, NOT_CITED_NOTE, size=8, italic=True, colour=CLR_DARK_GREY, space_before=2, space_after=6)
             _render_markdown_to_docx(doc, summary)
+            _add_citation_sources(doc, summary, citations)
 
         # Evidence sources
         if evidence_sources:

@@ -1,13 +1,15 @@
+import io
 import re
 from pathlib import Path
 
 import pytest
+from docx import Document
 
 from app import create_app
 from db.connection import set_database_path
 from db.migrate_runner import apply_migrations
 from db.repositories import projects_repo
-from services import research_task_service, tools
+from services import evidence_service, research_task_service, tools
 
 
 @pytest.fixture
@@ -207,3 +209,42 @@ def test_the_brief_never_includes_another_projects_facts(client):
     _other_project(client)
     text = client.get("/api/evidence/brief?project=P&phase=4").get_json()["brief"]["text"]
     assert "Deakin" in text and "Torrens" not in text and "Federation" not in text
+
+
+# ---- the Word report ----
+
+def test_the_word_report_lists_the_sources_of_this_projects_facts_only(client):
+    mine, theirs = _other_project(client)
+    deakin, monash = mine["fact_ids"]
+    torrens = theirs["fact_ids"][0]
+    insights = {"competitors": [], "phases": {
+        "4": {"title": "Product Features", "summary": f"Deakin is dear [F{deakin}]. Torrens [F{torrens}]. [F{monash}]",
+              "confidence": "medium"},
+        "5": {"title": "Academic Content", "summary": "From the reports only.", "confidence": "low"},
+    }}
+    resp = client.post("/api/insights/report", json={"insights": insights, "project_name": "P"})
+    assert resp.status_code == 200
+    texts = [p.text for p in Document(io.BytesIO(resp.data)).paragraphs]
+    start = texts.index("Cited sources")
+    assert texts[start + 1:start + 4] == [
+        f"F{deakin} — Deakin fees (2026) — https://deakin.example/fees",
+        f"F{torrens} — (not found)",
+        f"F{monash} — Research report: Fees",
+    ]
+    assert texts.count("Cited sources") == 1 and evidence_service.NOT_CITED_NOTE in texts
+
+
+def test_the_word_report_still_downloads_when_the_citation_lookup_fails(client, monkeypatch):
+    mine, _ = _other_project(client)
+    deakin = mine["fact_ids"][0]
+
+    def broken(project_name):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(evidence_service, "citation_index", broken)
+    insights = {"competitors": [], "phases": {
+        "4": {"title": "Product Features", "summary": f"Deakin is dear [F{deakin}].", "confidence": "medium"}}}
+    resp = client.post("/api/insights/report", json={"insights": insights, "project_name": "P"})
+    assert resp.status_code == 200
+    texts = [p.text for p in Document(io.BytesIO(resp.data)).paragraphs]
+    assert f"F{deakin} — (not found)" in texts

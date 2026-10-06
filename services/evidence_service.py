@@ -23,6 +23,7 @@ BRIEF_RULES = (
 # ASCII digits only, at most 9 (not \d, which also matches other scripts' digits and any length of run).
 MARKER_RE = re.compile(r"\[([FC])([0-9]{1,9})\]")
 SOURCE_CONCLUSION_CHARS = 200
+NOT_CITED_NOTE = "Not fact-cited — written from the reports only."
 
 
 def fact_dict(row):

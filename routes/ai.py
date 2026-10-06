@@ -3,6 +3,7 @@ import os
 
 from flask import Blueprint, Response, jsonify, request, send_file, session, stream_with_context
 
+from services import evidence_service
 from services.chat_service import append_message_to_chat, create_new_chat, load_chat_sessions_locked
 from services.deep_research_output import extract_deep_research_output as _extract_deep_research_output
 from services.docx_service import generate_insights_report
@@ -531,7 +532,14 @@ def insights_report():
         if not insights:
             return jsonify({"success": False, "error": "No insights data provided."}), 400
 
-        buf = generate_insights_report(insights, project_name=project_name)
+        # Each phase's [F#] / [C#] markers are looked up in this project's facts only (spec section 6). A failed
+        # lookup must not cost the person their download: every marker then reads "(not found)".
+        try:
+            citations = evidence_service.citation_index(_existing_project_name(project_name))
+        except Exception as e:
+            print(f"[report] citation lookup failed: {e}")
+            citations = None
+        buf = generate_insights_report(insights, project_name=project_name, citations=citations)
 
         return send_file(
             buf,
