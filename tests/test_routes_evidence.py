@@ -248,3 +248,19 @@ def test_the_word_report_still_downloads_when_the_citation_lookup_fails(client, 
     assert resp.status_code == 200
     texts = [p.text for p in Document(io.BytesIO(resp.data)).paragraphs]
     assert f"F{deakin} — (not found)" in texts
+
+
+def test_the_word_report_downloads_when_stored_text_has_control_characters(client):
+    junk = "\x00\x01\x08\x1b\ufffe\uffff"
+    _, data = _seed("P", [{"claim": "Deakin charges more" + junk, "source_url": "https://deakin.example/fees",
+                           "source_title": "a\x00b", "publisher": "c\x1bd" + junk, "as_of": "2026" + junk}])
+    fact_id = data["fact_ids"][0]
+    conclusion_id = data["conclusion_ids"][0]
+    insights = {"competitors": [], "phases": {
+        "4": {"title": "Product Features", "summary": f"Fees [F{fact_id}] [C{conclusion_id}].", "confidence": "medium"}}}
+    resp = client.post("/api/insights/report", json={"insights": insights, "project_name": "P"})
+    assert resp.status_code == 200
+    texts = [p.text for p in Document(io.BytesIO(resp.data)).paragraphs]
+    assert f"F{fact_id} — cd — ab (2026) — https://deakin.example/fees" in texts
+    brief = client.get("/api/evidence/brief?project=P&phase=4").get_json()["brief"]["text"]
+    assert not re.search("[\x00-\x08\x0e-\x1f\ufffe\uffff]", brief)

@@ -921,7 +921,7 @@ def generate_insights_report(data, project_name="Research Project", citations=No
         _run(conf_p, confidence_labels.get(confidence, "No Data"),
              size=8, bold=True, colour=confidence_colours.get(confidence, CLR_DARK_GREY))
 
-        if not summary or summary == "MISSING":
+        if not summary or not summary.strip() or summary == "MISSING":
             _para(doc,
                   "No data available for this phase. Use the Research Prompt feature in the dashboard "
                   "to generate targeted content for this section.",

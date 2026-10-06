@@ -293,3 +293,35 @@ def test_hostile_text_in_a_sources_line_stays_on_one_line(pid):
     assert not any(line.lstrip().startswith("#") for line in items)
     assert evidence_service.sources_lines(text, evidence_service.citation_index("P")) == [
         line[2:] for line in items]
+
+
+JUNK = "\x00\x01\x08\x0b\x0c\x0e\x1b\x1f\ufffe\uffff"
+
+
+def _xml_unsafe(text):
+    return re.search("[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]", text)
+
+
+def test_every_character_xml_cannot_hold_is_dropped_and_no_other_character_is_lost():
+    for code in range(0x110000):
+        flat = evidence_service._flat(f"a{chr(code)}b")
+        assert not _xml_unsafe(flat), hex(code)
+        assert flat.startswith("a") and flat.endswith("b"), hex(code)
+    assert evidence_service._flat("a\x00b") == "ab"
+    assert evidence_service._flat("line\x0bnext\x1cone") == "line next one"      # these were already spaces
+    assert evidence_service._flat("Café — 日本語 \U0001f600") == "Café — 日本語 \U0001f600"
+
+
+def test_control_characters_in_stored_text_stay_out_of_the_sources_and_the_brief(pid):
+    card = _card(pid, title="Report" + JUNK)
+    fact = _fact(pid, card, "A claim" + JUNK, as_of="2026" + JUNK,
+                 source=("https://a.example/p" + JUNK, "a\x00b", "c\x1bd"))
+    gone = _fact(pid, card, "Gone" + JUNK)
+    evidence_repo.set_fact_status(gone, "rejected")
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "Conclusion" + JUNK, [fact])
+    index = evidence_service.citation_index("P")
+    lines = evidence_service.sources_lines(f"[F{fact}] [C{conclusion}]", index)
+    assert lines[0].startswith(f"F{fact} — cd — ab (2026)")
+    brief = evidence_service.phase_brief(pid, "1")["text"]
+    assert not _xml_unsafe("\n".join(lines)) and not _xml_unsafe(brief)
+    assert not _xml_unsafe(evidence_service.sources_markdown(f"[F{fact}] [C{conclusion}]", index))

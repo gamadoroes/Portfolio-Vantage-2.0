@@ -53,3 +53,16 @@ def test_a_phase_without_markers_gets_the_note_and_no_sources():
 def test_without_a_lookup_every_marker_is_not_found():
     texts = _report({"1": _phase("The Landscape", "Cited [F12].")}, citations=None)
     assert "F12 — (not found)" in texts
+
+
+def test_a_phase_with_only_spaces_gets_neither_the_note_nor_sources():
+    texts = _report({"1": _phase("The Landscape", "Cited [F12]."), "2": _phase("The Student", "   \n  ")})
+    two = _section(texts, "Phase 2: The Student", "Data Completeness Overview")
+    assert evidence_service.NOT_CITED_NOTE not in two and "Cited sources" not in two
+    assert any(t.startswith("No data available for this phase") for t in two)
+
+
+def test_odd_characters_in_a_fact_do_not_stop_the_report():
+    fact = {**FACT_12, "source": {**FACT_12["source"], "title": "a\x00b", "publisher": "c\x1bd\ufffe"}}
+    texts = _report({"1": _phase("The Landscape", "Fees rose [F12].")}, citations={"facts": {12: fact}})
+    assert "F12 — cd — ab (2026) — https://deakin.example/fees" in texts

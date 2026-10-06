@@ -63,9 +63,15 @@ def list_evidence(project_name, phase_key=None):
     return phases
 
 
+# Characters XML (so Word) cannot hold: control characters, lone surrogates and U+FFFE / U+FFFF. str.split() already
+# turns \x0b, \x0c and \x1c-\x1f into spaces, so they are not listed here.
+_XML_UNSAFE_RE = re.compile(r"[\x00-\x08\x0e-\x1b\ud800-\udfff\ufffe\uffff]")
+
+
 def _flat(text):
-    """One line: line breaks and runs of spaces become single spaces, so no item can start a heading."""
-    return " ".join(str(text or "").split())
+    """One line: line breaks and runs of spaces become single spaces, so no item can start a heading. Characters
+    Word cannot hold are dropped."""
+    return " ".join(_XML_UNSAFE_RE.sub("", str(text or "")).split())
 
 
 def _fit(lines, room, one, many):
