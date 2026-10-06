@@ -1730,7 +1730,7 @@ CRITICAL INSTRUCTIONS:
     };
 
     // Facts first (spec section 4): when this phase has checked facts, the server's facts briefing follows the
-    // guidance. A phase without facts, or a failed request, leaves the prompt exactly as before.
+    // guidance. A phase with no active or rejected facts, or a failed request, leaves the prompt exactly as before.
     const briefProject = currentProject;
     if (typeof evidencePhaseBriefAddition === 'function') {
         if (refuseIfRunning()) return;
