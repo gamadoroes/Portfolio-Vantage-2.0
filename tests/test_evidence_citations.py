@@ -265,3 +265,31 @@ def test_the_sources_list_as_markdown(pid):
     fact = _fact(pid, _card(pid), "Fees", source=("https://a.example", "Page A", None))
     assert evidence_service.sources_markdown(f"Dear [F{fact}].", evidence_service.citation_index("P")) == (
         f"\n\n## Sources\n\n- F{fact} — Page A — https://a.example")
+
+
+def test_only_plain_ascii_digit_markers_count_and_a_huge_number_cannot_raise():
+    assert evidence_service.cited_markers("[F\uff11\uff12] [F\u0663] [C\u0661] [F\u09e7]") == []   # fullwidth, Arabic-Indic, Bengali
+    assert evidence_service.cited_markers("[F" + "1" * 5000 + "]") == []
+    assert evidence_service.cited_markers("[F1234567890]") == []                                   # ten digits: not an id
+    assert evidence_service.cited_markers("[F123456789] [F12] [C007]") == [("F", 123456789), ("F", 12), ("C", 7)]
+    assert evidence_service.sources_lines("[F\u0663] [F" + "9" * 5000 + "]", None) == []
+    assert evidence_service.sources_markdown("[F\uff11]", None) == ""
+
+
+def test_hostile_text_in_a_sources_line_stays_on_one_line(pid):
+    breaks = "\n# Heading\r\n## More\u2028# Line sep\u2029# Para sep\x85# Next line\x0b# VT\x0c# FF\u00a0# nbsp"
+    card = _card(pid, title="Report" + breaks)
+    fact = _fact(pid, card, "A claim", as_of="2026" + breaks,
+                 source=("https://a.example/p" + breaks, "Title" + breaks, "Publisher" + breaks))
+    bare = _fact(pid, card, "Another claim", as_of="2025" + breaks)
+    conclusion = evidence_repo.create_conclusion(pid, "1", card, "Conclusion" + breaks, [fact, bare])
+    text = f"[F{fact}] [C{conclusion}] [F{bare}]"
+    markdown = evidence_service.sources_markdown(text, evidence_service.citation_index("P"))
+    lines = markdown.splitlines()                      # splits on every kind of line break, not only \n
+    assert lines[:4] == ["", "", "## Sources", ""]
+    items = lines[4:]
+    assert len(items) == 3
+    assert [item.split(" — ")[0] for item in items] == [f"- F{fact}", f"- C{conclusion}", f"- F{bare}"]
+    assert not any(line.lstrip().startswith("#") for line in items)
+    assert evidence_service.sources_lines(text, evidence_service.citation_index("P")) == [
+        line[2:] for line in items]
